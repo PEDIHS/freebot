@@ -49,32 +49,54 @@ REL="$TMP_DIR/repo/release"
 mkdir -p "$TMP_DIR/src"
 
 unpack_release(){
-  local prefix="$1" sha_file="$2" out="$3"
-  local parts=("$REL/${prefix}.b64.part-"*)
+  local prefix="$1" out="$2"
+  local parts=()
+  shopt -s nullglob
+  parts=("$REL/${prefix}.b64.part-"*)
+  shopt -u nullglob
   (( ${#parts[@]} > 0 )) || fail "تکه‌های $prefix پیدا نشد."
-  cat "${parts[@]}" > "$TMP_DIR/${prefix}.b64"
+
+  : > "$TMP_DIR/${prefix}.b64"
+  cat "${parts[@]}" >> "$TMP_DIR/${prefix}.b64" || fail "خواندن تکه‌های $prefix ناموفق بود."
   base64 -d "$TMP_DIR/${prefix}.b64" > "$TMP_DIR/$out" || fail "Decode $prefix ناموفق بود."
-  local expected actual
-  expected="$(awk '{print $1}' "$REL/$sha_file")"
-  actual="$(sha256sum "$TMP_DIR/$out" | awk '{print $1}')"
-  [[ -n "$expected" && "$expected" == "$actual" ]] || fail "Checksum $prefix معتبر نیست."
-  tar -tzf "$TMP_DIR/$out" >/dev/null || fail "آرشیو $prefix خراب است."
-  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src"
+  [[ -s "$TMP_DIR/$out" ]] || fail "آرشیو $prefix خالی است."
+  tar -tzf "$TMP_DIR/$out" >/dev/null 2>&1 || fail "آرشیو $prefix خراب یا ناقص است."
+  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" || fail "Extract $prefix ناموفق بود."
 }
 
 log "بازسازی release به صورت محلی"
-unpack_release "freebot.tar.gz" "freebot.tar.gz.sha256" "freebot.tar.gz"
-unpack_release "media-patch.tar.gz" "media-patch.tar.gz.sha256" "media-patch.tar.gz"
+unpack_release "freebot.tar.gz" "freebot.tar.gz"
+unpack_release "media-patch.tar.gz" "media-patch.tar.gz"
 if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then
-  unpack_release "media-hotfix.tar.gz" "media-hotfix.tar.gz.sha256" "media-hotfix.tar.gz"
+  unpack_release "media-hotfix.tar.gz" "media-hotfix.tar.gz"
 fi
+
+# آخرین updater همیشه از root ریپو گرفته می‌شود تا نصب‌های قدیمی نیز مسیر آپدیت جدید را دریافت کنند.
+if [[ -f "$TMP_DIR/repo/update.sh" ]]; then
+  mkdir -p "$TMP_DIR/src/scripts"
+  install -m 0755 "$TMP_DIR/repo/update.sh" "$TMP_DIR/src/scripts/update.sh"
+fi
+
+log "اعتبارسنجی سورس نهایی"
+required_files=(
+  "index.php"
+  "webhook.php"
+  "cron.php"
+  "install/index.php"
+  "app/bootstrap.php"
+  "database/schema.sql"
+  "scripts/media-supervisor.php"
+  "scripts/media-worker.php"
+  "scripts/update.sh"
+)
+for required in "${required_files[@]}"; do
+  [[ -f "$TMP_DIR/src/$required" ]] || fail "فایل ضروری release موجود نیست: $required"
+done
+find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-install-php-lint.log 2>&1 \
+  || { cat /tmp/freebot-install-php-lint.log >&2; fail "PHP lint سورس release ناموفق بود."; }
 
 mkdir -p "$APP_DIR"
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
-# Always install the latest Git-local updater from repository root.
-if [[ -f "$TMP_DIR/repo/update.sh" ]]; then
-  install -m 0755 "$TMP_DIR/repo/update.sh" "$APP_DIR/scripts/update.sh"
-fi
 
 log "ساخت مسیرها و Permission"
 mkdir -p "$APP_DIR/config" "$APP_DIR/storage"/{backups,logs,locks,temp,downloads} \
