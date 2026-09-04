@@ -2,22 +2,25 @@
 
 ربات PHP + Telegram Webhook با پنل مدیریت، نصبگر وب، Cron، MariaDB، SSL، آپدیت از GitHub و موتور حرفه‌ای دانلود/آپلود رسانه.
 
-## نصب کامل روی Ubuntu/Debian با یک دستور
+## نصب کامل روی Ubuntu/Debian
 
 به‌عنوان `root` اجرا کن:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
+rm -rf /tmp/freebot-setup && \
+git -c http.version=HTTP/1.1 clone --depth 1 --branch main https://github.com/PEDIHS/freebot.git /tmp/freebot-setup && \
+bash /tmp/freebot-setup/bootstrap.sh
 ```
 
 اگر دیتابیس `freebot` و کاربر آن را از قبل ساخته‌ای:
 
 ```bash
-DOMAIN=bot.example.com SKIP_DB=1 \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
+rm -rf /tmp/freebot-setup && \
+git -c http.version=HTTP/1.1 clone --depth 1 --branch main https://github.com/PEDIHS/freebot.git /tmp/freebot-setup && \
+SKIP_DB=1 bash /tmp/freebot-setup/bootstrap.sh
 ```
 
-Bootstrap به‌صورت خودکار Nginx، PHP-FPM، MariaDB، Certbot، Cron و مسیرهای runtime را آماده می‌کند، release اصلی و overlay را با SHA-256 بررسی می‌کند و سپس آخرین Hotfix موتور Worker را نیز با checksum مستقل اعمال می‌کند.
+Bootstrap به‌صورت خودکار Nginx، PHP-FPM، MariaDB، Certbot، Cron و مسیرهای runtime را آماده می‌کند. release اصلی، media patch و hotfix از همان clone محلی بازسازی می‌شوند؛ سپس آرشیوهای tar تست، فایل‌های ضروری کنترل و تمام فایل‌های PHP lint می‌شوند. به این ترتیب نصب به Raw GitHub یا checksumهای تکراری و stale وابسته نیست.
 
 بعد از آماده‌شدن زیرساخت، Installer وب در این آدرس در دسترس است:
 
@@ -70,17 +73,7 @@ Official Telegram API max file setting: 48 MB safe limit
 دانلود و آپلود فیلم
 ```
 
-در آن می‌توان:
-
-- URL جدید به صف اضافه کرد
-- مقصد Telegram را تعیین کرد
-- Priority تعیین کرد
-- Download/Upload Worker Count را تغییر داد
-- Fragment Concurrency را تغییر داد
-- Telegram API Base URL را تنظیم کرد
-- وضعیت ابزارهای سرور و Supervisor را دید
-- سرعت و Progress هر Job را به‌صورت زنده دید
-- Job را Cancel، Retry یا Delete کرد
+در آن می‌توان URL جدید به صف اضافه کرد، مقصد Telegram و Priority را تعیین کرد، تعداد Download/Upload Workerها و Fragment Concurrency را تغییر داد، Telegram API Base URL را تنظیم کرد، وضعیت ابزارهای سرور و Supervisor را دید و سرعت و Progress هر Job را به‌صورت زنده مشاهده کرد. Jobها نیز قابلیت Cancel، Retry و Delete دارند.
 
 ## Telegram Bot API
 
@@ -110,21 +103,12 @@ journalctl -u freebot-media -f
 freebot-update
 ```
 
-Updater release، overlay و Hotfix را با SHA-256 اعتبارسنجی می‌کند، PHP lint انجام می‌دهد، backup می‌گیرد، migration دیتابیس را اجرا می‌کند و اطلاعات runtime را حفظ می‌کند، از جمله:
-
-- `config/app.php`
-- `storage/installed.lock`
-- Queueها و Jobها
-- Logها
-- Downloadهای جاری
-- Backupها
-- دیتابیس و تنظیمات نصب‌شده
+Updater آخرین repo را clone می‌کند، release را محلی بازسازی می‌کند، سلامت آرشیوها و فایل‌های ضروری را بررسی می‌کند، PHP lint انجام می‌دهد، backup می‌گیرد، migration دیتابیس را اجرا می‌کند و اطلاعات runtime را حفظ می‌کند، از جمله `config/app.php`، `storage/installed.lock`، Queueها، Jobها، Logها، Downloadهای جاری، Backupها و دیتابیس/تنظیمات نصب‌شده.
 
 برای Auto Update هنگام نصب:
 
 ```bash
-DOMAIN=bot.example.com AUTO_UPDATE=1 \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
+AUTO_UPDATE=1 SKIP_DB=1 bash /tmp/freebot-setup/bootstrap.sh
 ```
 
 ## تست سلامت نصب
