@@ -74,21 +74,17 @@ OVERLAY_ACTUAL="$(sha256sum "$TMP_DIR/media-overlay.patch.gz" | awk '{print $1}'
 [[ -n "$OVERLAY_EXPECTED" && "$OVERLAY_EXPECTED" == "$OVERLAY_ACTUAL" ]] || fail "Checksum Media Overlay معتبر نیست."
 gzip -t "$TMP_DIR/media-overlay.patch.gz" || fail "Media Overlay خراب است."
 gzip -dc "$TMP_DIR/media-overlay.patch.gz" > "$TMP_DIR/media-overlay.patch"
-
-# بعضی نسخه‌های پایه تاریخی بخشی از فایل‌های Media را از قبل دارند. patch در این حالت
-# exit-code غیر صفر می‌دهد، حتی وقتی تمام تغییرات موردنیاز نهایی قابل اعتبارسنجی هستند.
-# بنابراین نتیجه واقعی را با فایل‌های ضروری + PHP lint + تست کامل پروژه تعیین می‌کنیم.
 set +e
 ( cd "$TMP_DIR/src" && patch -p1 --batch --forward < "$TMP_DIR/media-overlay.patch" ) >"$TMP_DIR/media-overlay.log" 2>&1
 PATCH_RC=$?
 set -e
-cat "$TMP_DIR/media-overlay.log"
 if (( PATCH_RC != 0 )); then
-  log "Patch چند conflict سازگاری گزارش کرد؛ اعتبارسنجی کامل سورس تعیین می‌کند نصب قابل قبول است یا نه."
+  log "Patch conflict سازگاری داشت؛ فایل canonical و تست کامل نتیجه نهایی را تعیین می‌کنند."
 fi
 find "$TMP_DIR/src" -type f \( -name '*.rej' -o -name '*.orig' \) -delete
 printf '%s\n' "$TARGET_VERSION" > "$TMP_DIR/src/VERSION"
-
+[[ -f "$REPO_DIR/overrides/app/MediaDownloader.php" ]] || fail "MediaDownloader override پیدا نشد."
+install -m 0644 "$REPO_DIR/overrides/app/MediaDownloader.php" "$TMP_DIR/src/app/MediaDownloader.php"
 mkdir -p "$TMP_DIR/src/scripts"
 install -m 0755 "$REPO_DIR/update.sh" "$TMP_DIR/src/scripts/update.sh"
 
@@ -103,15 +99,16 @@ grep -q 'CREATE TABLE IF NOT EXISTS media_jobs' "$TMP_DIR/src/database/schema.sq
 grep -q "media_download_workers" "$TMP_DIR/src/database/schema.sql" || fail "تنظیمات Media Worker در schema وجود ندارد."
 grep -q "دانلود و آپلود فیلم" "$TMP_DIR/src/admin/index.php" || fail "بخش Media در پنل مدیریت وجود ندارد."
 grep -q "MediaDownloader.php" "$TMP_DIR/src/app/bootstrap.php" || fail "MediaDownloader در bootstrap بارگذاری نمی‌شود."
+grep -q -- "--downloader" "$TMP_DIR/src/app/MediaDownloader.php" || fail "aria2 downloader در MediaDownloader فعال نیست."
+grep -q "aria2c" "$TMP_DIR/src/app/MediaDownloader.php" || fail "aria2c در MediaDownloader وجود ندارد."
 find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-install-php-lint.log 2>&1 \
   || { cat /tmp/freebot-install-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
 php "$TMP_DIR/src/tests/run.php" > /tmp/freebot-install-tests.log 2>&1 \
-  || { tail -100 /tmp/freebot-install-tests.log >&2; fail "تست داخلی پروژه ناموفق بود؛ هیچ فایلی روی وب‌سرور نصب نشد."; }
+  || { cat "$TMP_DIR/media-overlay.log" >&2; tail -100 /tmp/freebot-install-tests.log >&2; fail "تست داخلی پروژه ناموفق بود؛ هیچ فایلی روی وب‌سرور نصب نشد."; }
 grep -Eq 'RESULT: [0-9]+ passed, 0 failed' /tmp/freebot-install-tests.log \
   || { tail -100 /tmp/freebot-install-tests.log >&2; fail "نتیجه تست معتبر نیست."; }
 log "سورس نهایی معتبر است: $(tail -1 /tmp/freebot-install-tests.log)"
 
-# فقط بعد از پاس شدن همه تست‌ها فایل‌ها وارد مسیر production می‌شوند.
 mkdir -p "$APP_DIR"
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
 
