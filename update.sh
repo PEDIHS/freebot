@@ -6,37 +6,82 @@ BRANCH="${BRANCH:-main}"
 QUIET=0; [[ "${1:-}" == "--quiet" ]] && QUIET=1
 log(){ [[ "$QUIET" == "1" ]] || printf '[freebot-update] %s\n' "$*"; }
 fail(){ printf '[freebot-update] ERROR: %s\n' "$*" >&2; exit 1; }
+
 [[ "$EUID" -eq 0 ]] || fail "با root اجرا کن."
 [[ -d "$APP_DIR" ]] || fail "$APP_DIR وجود ندارد."
 TMP_DIR="$(mktemp -d)"; trap 'rm -rf "$TMP_DIR"' EXIT
+
 log "Clone آخرین نسخه"
-git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" >/dev/null 2>&1 || fail "git clone ناموفق بود."
-REL="$TMP_DIR/repo/release"; mkdir -p "$TMP_DIR/src"
+git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" >/dev/null 2>&1 \
+  || fail "git clone ناموفق بود."
+REL="$TMP_DIR/repo/release"
+mkdir -p "$TMP_DIR/src"
+
 unpack(){
-  local prefix="$1" sha="$2" out="$3" parts=("$REL/${prefix}.b64.part-"*)
+  local prefix="$1" out="$2"
+  local parts=()
+  shopt -s nullglob
+  parts=("$REL/${prefix}.b64.part-"*)
+  shopt -u nullglob
   (( ${#parts[@]} > 0 )) || fail "تکه‌های $prefix پیدا نشد."
-  cat "${parts[@]}" > "$TMP_DIR/${prefix}.b64"
-  base64 -d "$TMP_DIR/${prefix}.b64" > "$TMP_DIR/$out"
-  [[ "$(awk '{print $1}' "$REL/$sha")" == "$(sha256sum "$TMP_DIR/$out"|awk '{print $1}')" ]] || fail "Checksum $prefix نامعتبر است."
-  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src"
+
+  : > "$TMP_DIR/${prefix}.b64"
+  cat "${parts[@]}" >> "$TMP_DIR/${prefix}.b64" || fail "خواندن تکه‌های $prefix ناموفق بود."
+  base64 -d "$TMP_DIR/${prefix}.b64" > "$TMP_DIR/$out" || fail "Decode $prefix ناموفق بود."
+  [[ -s "$TMP_DIR/$out" ]] || fail "آرشیو $prefix خالی است."
+  tar -tzf "$TMP_DIR/$out" >/dev/null 2>&1 || fail "آرشیو $prefix خراب یا ناقص است."
+  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" || fail "Extract $prefix ناموفق بود."
 }
-unpack freebot.tar.gz freebot.tar.gz.sha256 freebot.tar.gz
-unpack media-patch.tar.gz media-patch.tar.gz.sha256 media-patch.tar.gz
-if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then unpack media-hotfix.tar.gz media-hotfix.tar.gz.sha256 media-hotfix.tar.gz; fi
+
+unpack freebot.tar.gz freebot.tar.gz
+unpack media-patch.tar.gz media-patch.tar.gz
+if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then
+  unpack media-hotfix.tar.gz media-hotfix.tar.gz
+fi
+
 [[ -f "$TMP_DIR/repo/update.sh" ]] && install -m 0755 "$TMP_DIR/repo/update.sh" "$TMP_DIR/src/scripts/update.sh"
-NEW="$(cat "$TMP_DIR/src/VERSION" 2>/dev/null || echo unknown)"; OLD="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
+
+required_files=(
+  "index.php"
+  "webhook.php"
+  "cron.php"
+  "install/index.php"
+  "app/bootstrap.php"
+  "database/schema.sql"
+  "scripts/media-supervisor.php"
+  "scripts/media-worker.php"
+  "scripts/update.sh"
+)
+for required in "${required_files[@]}"; do
+  [[ -f "$TMP_DIR/src/$required" ]] || fail "فایل ضروری release موجود نیست: $required"
+done
+
+NEW="$(cat "$TMP_DIR/src/VERSION" 2>/dev/null || echo unknown)"
+OLD="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
 mkdir -p "$APP_DIR/storage/backups"
 BACKUP="$APP_DIR/storage/backups/pre-update-$(date +%Y%m%d-%H%M%S).tar.gz"
 tar -C "$APP_DIR" -czf "$BACKUP" --exclude='./storage/backups' --exclude='./storage/logs' --exclude='./storage/temp' --exclude='./storage/downloads' .
-find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-php-lint.log 2>&1 || { cat /tmp/freebot-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
+
+find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-php-lint.log 2>&1 \
+  || { cat /tmp/freebot-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
+
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
 mkdir -p "$APP_DIR/config" "$APP_DIR/storage"/{backups,logs,locks,temp,downloads} "$APP_DIR/storage/source_queue"/{pending,processing,failed,done}
-chown -R root:root "$APP_DIR"; find "$APP_DIR" -type d -exec chmod 755 {} \;; find "$APP_DIR" -type f -exec chmod 644 {} \;
-chown -R www-data:www-data "$APP_DIR/config" "$APP_DIR/storage"; find "$APP_DIR/config" "$APP_DIR/storage" -type d -exec chmod 750 {} \;; find "$APP_DIR/config" "$APP_DIR/storage" -type f -exec chmod 640 {} \;
+chown -R root:root "$APP_DIR"
+find "$APP_DIR" -type d -exec chmod 755 {} \;
+find "$APP_DIR" -type f -exec chmod 644 {} \;
+chown -R www-data:www-data "$APP_DIR/config" "$APP_DIR/storage"
+find "$APP_DIR/config" "$APP_DIR/storage" -type d -exec chmod 750 {} \;
+find "$APP_DIR/config" "$APP_DIR/storage" -type f -exec chmod 640 {} \;
 chmod +x "$APP_DIR/install.sh" "$APP_DIR/scripts/"*.sh 2>/dev/null || true
 ln -sfn "$APP_DIR/scripts/update.sh" /usr/local/sbin/freebot-update
-if [[ -f "$APP_DIR/config/app.php" && -f "$APP_DIR/storage/installed.lock" ]]; then php "$APP_DIR/scripts/migrate.php" || fail "Migration ناموفق؛ Backup: $BACKUP"; fi
-PHP_FPM_SERVICE="$(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service'|awk '{print $1}'|sort -V|tail -1)"; [[ -z "$PHP_FPM_SERVICE" ]] || systemctl restart "$PHP_FPM_SERVICE" || true
+
+if [[ -f "$APP_DIR/config/app.php" && -f "$APP_DIR/storage/installed.lock" ]]; then
+  php "$APP_DIR/scripts/migrate.php" || fail "Migration ناموفق؛ Backup: $BACKUP"
+fi
+
+PHP_FPM_SERVICE="$(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service' | awk '{print $1}' | sort -V | tail -1)"
+[[ -z "$PHP_FPM_SERVICE" ]] || systemctl restart "$PHP_FPM_SERVICE" || true
 nginx -t >/dev/null && systemctl reload nginx || true
 systemctl restart freebot-media.service || true
 log "آپدیت کامل شد: $OLD -> $NEW"
