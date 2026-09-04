@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || tr
 REPO_DIR=""
 TMP=""
 
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -f "$SCRIPT_DIR/healthcheck.sh" && -f "$SCRIPT_DIR/repair_release.py" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -f "$SCRIPT_DIR/healthcheck.sh" && -d "$SCRIPT_DIR/release" ]]; then
   REPO_DIR="$SCRIPT_DIR"
   log "استفاده از clone محلی موجود"
 else
