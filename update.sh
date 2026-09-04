@@ -15,55 +15,43 @@ log "Clone آخرین نسخه"
 git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" >/dev/null 2>&1 \
   || fail "git clone ناموفق بود."
 REL="$TMP_DIR/repo/release"
+REPAIR="$TMP_DIR/repo/repair_release.py"
+[[ -f "$REPAIR" ]] || fail "repair_release.py پیدا نشد."
 mkdir -p "$TMP_DIR/src"
 
 unpack(){
-  local prefix="$1" out="$2"
-  local parts=()
-  shopt -s nullglob
-  parts=("$REL/${prefix}.b64.part-"*)
-  shopt -u nullglob
-  (( ${#parts[@]} > 0 )) || fail "تکه‌های $prefix پیدا نشد."
-
-  : > "$TMP_DIR/${prefix}.b64"
-  cat "${parts[@]}" >> "$TMP_DIR/${prefix}.b64" || fail "خواندن تکه‌های $prefix ناموفق بود."
-  base64 -d "$TMP_DIR/${prefix}.b64" > "$TMP_DIR/$out" || fail "Decode $prefix ناموفق بود."
-  [[ -s "$TMP_DIR/$out" ]] || fail "آرشیو $prefix خالی است."
-  tar -tzf "$TMP_DIR/$out" >/dev/null 2>&1 || fail "آرشیو $prefix خراب یا ناقص است."
-  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" || fail "Extract $prefix ناموفق بود."
+  local prefix="$1" sha_file="$2" out="$3"
+  python3 "$REPAIR" "$REL" "$prefix" "$sha_file" "$TMP_DIR/$out" \
+    || fail "بازسازی $prefix ناموفق بود."
+  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" \
+    || fail "Extract $prefix ناموفق بود."
 }
 
-unpack freebot.tar.gz freebot.tar.gz
-unpack media-patch.tar.gz media-patch.tar.gz
+log "بازسازی و اعتبارسنجی release"
+unpack freebot.tar.gz freebot.tar.gz.sha256 freebot.tar.gz
+unpack media-patch.tar.gz media-patch.tar.gz.sha256 media-patch.tar.gz
 if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then
-  unpack media-hotfix.tar.gz media-hotfix.tar.gz
+  unpack media-hotfix.tar.gz media-hotfix.tar.gz.sha256 media-hotfix.tar.gz
 fi
 
-[[ -f "$TMP_DIR/repo/update.sh" ]] && install -m 0755 "$TMP_DIR/repo/update.sh" "$TMP_DIR/src/scripts/update.sh"
+mkdir -p "$TMP_DIR/src/scripts"
+install -m 0755 "$TMP_DIR/repo/update.sh" "$TMP_DIR/src/scripts/update.sh"
 
 required_files=(
-  "index.php"
-  "webhook.php"
-  "cron.php"
-  "install/index.php"
-  "app/bootstrap.php"
-  "database/schema.sql"
-  "scripts/media-supervisor.php"
-  "scripts/media-worker.php"
-  "scripts/update.sh"
+  "index.php" "webhook.php" "cron.php" "install/index.php" "app/bootstrap.php"
+  "database/schema.sql" "scripts/media-supervisor.php" "scripts/media-worker.php" "scripts/update.sh"
 )
 for required in "${required_files[@]}"; do
   [[ -f "$TMP_DIR/src/$required" ]] || fail "فایل ضروری release موجود نیست: $required"
 done
+find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-php-lint.log 2>&1 \
+  || { cat /tmp/freebot-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
 
 NEW="$(cat "$TMP_DIR/src/VERSION" 2>/dev/null || echo unknown)"
 OLD="$(cat "$APP_DIR/VERSION" 2>/dev/null || echo unknown)"
 mkdir -p "$APP_DIR/storage/backups"
 BACKUP="$APP_DIR/storage/backups/pre-update-$(date +%Y%m%d-%H%M%S).tar.gz"
 tar -C "$APP_DIR" -czf "$BACKUP" --exclude='./storage/backups' --exclude='./storage/logs' --exclude='./storage/temp' --exclude='./storage/downloads' .
-
-find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-php-lint.log 2>&1 \
-  || { cat /tmp/freebot-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
 
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
 mkdir -p "$APP_DIR/config" "$APP_DIR/storage"/{backups,logs,locks,temp,downloads} "$APP_DIR/storage/source_queue"/{pending,processing,failed,done}
