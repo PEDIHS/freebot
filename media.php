@@ -125,6 +125,9 @@ final class MediaQueue
 
     private static function claimJob(string $role,string $workerId): ?array
     {
+        // Keep the lease operation self-contained: every claimant must have a
+        // heartbeat row, including workers that find an empty queue.
+        self::registerWorker($workerId,$role);
         $status=$role==='download'?'queued':'downloaded';$lease=self::lockSeconds();
         for($attempt=0;$attempt<10;$attempt++){
             $candidate=App::one("SELECT j.id FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.status=? AND b.status IN ('queued','running') AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=NOW()) AND (j.lock_expires_at IS NULL OR j.lock_expires_at<NOW()) ORDER BY b.id,j.position,j.id LIMIT 1",[$status]);
