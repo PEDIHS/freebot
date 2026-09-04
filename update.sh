@@ -30,10 +30,11 @@ set +e
 ( cd "$TMP/src" && patch -p1 --batch --forward < "$TMP/overlay.patch" ) >"$TMP/overlay.log" 2>&1
 PATCH_RC=$?
 set -e
-[[ "$QUIET" == "1" ]] || cat "$TMP/overlay.log"
-if (( PATCH_RC != 0 )); then log "Overlay conflict سازگاری داشت؛ نتیجه با تست کامل تعیین می‌شود."; fi
+if (( PATCH_RC != 0 )); then log "Overlay conflict سازگاری داشت؛ فایل canonical و تست کامل نتیجه نهایی را تعیین می‌کنند."; fi
 find "$TMP/src" -type f \( -name '*.rej' -o -name '*.orig' \) -delete
 printf '%s\n' "$TARGET_VERSION" > "$TMP/src/VERSION"
+[[ -f "$TMP/repo/overrides/app/MediaDownloader.php" ]] || fail "MediaDownloader override پیدا نشد."
+install -m 0644 "$TMP/repo/overrides/app/MediaDownloader.php" "$TMP/src/app/MediaDownloader.php"
 mkdir -p "$TMP/src/scripts"
 install -m 0755 "$TMP/repo/update.sh" "$TMP/src/scripts/update.sh"
 
@@ -47,8 +48,10 @@ grep -q 'CREATE TABLE IF NOT EXISTS media_jobs' "$TMP/src/database/schema.sql" |
 grep -q 'media_download_workers' "$TMP/src/database/schema.sql" || fail "تنظیمات Worker در schema وجود ندارد."
 grep -q 'دانلود و آپلود فیلم' "$TMP/src/admin/index.php" || fail "بخش Media در پنل وجود ندارد."
 grep -q 'MediaDownloader.php' "$TMP/src/app/bootstrap.php" || fail "Bootstrap موتور Media ناقص است."
+grep -q -- '--downloader' "$TMP/src/app/MediaDownloader.php" || fail "aria2 downloader فعال نیست."
+grep -q 'aria2c' "$TMP/src/app/MediaDownloader.php" || fail "aria2c در MediaDownloader وجود ندارد."
 find "$TMP/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-update-lint.log 2>&1 || { cat /tmp/freebot-update-lint.log >&2; fail "PHP lint ناموفق بود."; }
-php "$TMP/src/tests/run.php" >/tmp/freebot-update-tests.log 2>&1 || { tail -100 /tmp/freebot-update-tests.log >&2; fail "تست پروژه ناموفق بود؛ آپدیت اعمال نشد."; }
+php "$TMP/src/tests/run.php" >/tmp/freebot-update-tests.log 2>&1 || { [[ "$QUIET" == "1" ]] || cat "$TMP/overlay.log" >&2; tail -100 /tmp/freebot-update-tests.log >&2; fail "تست پروژه ناموفق بود؛ آپدیت اعمال نشد."; }
 grep -Eq 'RESULT: [0-9]+ passed, 0 failed' /tmp/freebot-update-tests.log || { tail -100 /tmp/freebot-update-tests.log >&2; fail "نتیجه تست معتبر نیست."; }
 log "Release معتبر است: $(tail -1 /tmp/freebot-update-tests.log)"
 
