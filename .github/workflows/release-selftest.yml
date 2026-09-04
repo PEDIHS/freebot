@@ -1,0 +1,66 @@
+name: Release Self Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'release/**'
+      - 'install.sh'
+      - 'update.sh'
+      - '.github/workflows/release-selftest.yml'
+  workflow_dispatch:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install runtime tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y php-cli php-mbstring php-xml php-curl php-zip patch
+      - name: Rebuild exact GitHub base and overlay
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TMP="$(mktemp -d)"
+          mkdir -p "$TMP/src"
+          cat release/freebot.tar.gz.b64.part-* > "$TMP/base.b64"
+          base64 -d "$TMP/base.b64" > "$TMP/base.tar.gz"
+          test "$(sha256sum "$TMP/base.tar.gz" | awk '{print $1}')" = "$(awk '{print $1}' release/freebot.tar.gz.sha256)"
+          tar -tzf "$TMP/base.tar.gz" >/dev/null
+          tar -xzf "$TMP/base.tar.gz" -C "$TMP/src"
+
+          cat release/media-overlay.patch.gz.b64.part-* > "$TMP/overlay.b64"
+          base64 -d "$TMP/overlay.b64" > "$TMP/overlay.patch.gz"
+          test "$(sha256sum "$TMP/overlay.patch.gz" | awk '{print $1}')" = "$(awk '{print $1}' release/media-overlay.patch.gz.sha256)"
+          gzip -t "$TMP/overlay.patch.gz"
+          gzip -dc "$TMP/overlay.patch.gz" > "$TMP/overlay.patch"
+
+          set +e
+          (cd "$TMP/src" && patch -p1 --batch --forward < "$TMP/overlay.patch") > "$TMP/patch.log" 2>&1
+          PATCH_RC=$?
+          set -e
+          echo "patch_rc=$PATCH_RC"
+          cat "$TMP/patch.log"
+          find "$TMP/src" -type f \( -name '*.rej' -o -name '*.orig' \) -delete
+          printf '1.9.3-media-engine\n' > "$TMP/src/VERSION"
+          mkdir -p "$TMP/src/scripts"
+          cp update.sh "$TMP/src/scripts/update.sh"
+
+          test -f "$TMP/src/admin/media-status.php"
+          test -f "$TMP/src/app/MediaDownloader.php"
+          test -f "$TMP/src/app/MediaQueue.php"
+          test -f "$TMP/src/app/MediaWorker.php"
+          test -f "$TMP/src/scripts/media-supervisor.php"
+          test -f "$TMP/src/scripts/media-worker.php"
+          test -f "$TMP/src/scripts/migrate.php"
+          grep -q 'CREATE TABLE IF NOT EXISTS media_jobs' "$TMP/src/database/schema.sql"
+          grep -q 'media_download_workers' "$TMP/src/database/schema.sql"
+          grep -q 'دانلود و آپلود فیلم' "$TMP/src/admin/index.php"
+          grep -q 'MediaDownloader.php' "$TMP/src/app/bootstrap.php"
+
+          find "$TMP/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          php "$TMP/src/tests/run.php" | tee "$TMP/tests.log"
+          grep -Eq 'RESULT: [0-9]+ passed, 0 failed' "$TMP/tests.log"
+          echo 'EXACT_GITHUB_RELEASE_OK=1'
