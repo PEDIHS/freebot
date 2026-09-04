@@ -46,6 +46,7 @@ final class App
         if (self::$migrated) return;
         self::$migrated = true;
         try {
+            self::ensureCoreSchema($pdo);
             $col = $pdo->query("SHOW COLUMNS FROM menus LIKE 'style'")->fetch();
             if (!$col) $pdo->exec("ALTER TABLE menus ADD COLUMN style varchar(20) NOT NULL DEFAULT '' AFTER label");
             $pdo->exec("CREATE TABLE IF NOT EXISTS button_styles (button_key varchar(120) PRIMARY KEY,label varchar(255) NOT NULL,group_title varchar(255) NOT NULL,style varchar(20) NOT NULL DEFAULT '',sort_order int NOT NULL DEFAULT 100) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -148,10 +149,59 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.0.1-media-migration') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.0.2-core-migration') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
+    }
+
+    private static function ensureCoreSchema(PDO $pdo): void
+    {
+        // A database reused from an unrelated/older bot can contain tables
+        // with familiar names but an incomplete shape. Add only missing
+        // columns so existing film-store data remains intact.
+        $tables=[
+            'settings'=>['value'=>"longtext NULL"],
+            'admins'=>['telegram_id'=>"varchar(32) NOT NULL DEFAULT ''",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'users'=>['telegram_id'=>"varchar(32) NOT NULL DEFAULT ''",'username'=>"varchar(100) NULL",'first_name'=>"varchar(255) NOT NULL DEFAULT ''",'last_name'=>"varchar(255) NOT NULL DEFAULT ''",'balance'=>"decimal(18,0) NOT NULL DEFAULT 0",'referrer_user_id'=>"bigint unsigned NULL",'referral_percent_override'=>"decimal(8,2) NULL",'referral_fixed_override'=>"decimal(18,0) NULL",'blocked'=>"tinyint(1) NOT NULL DEFAULT 0",'state'=>"varchar(100) NULL",'state_data'=>"longtext NULL",'inline_menu_ready'=>"tinyint(1) NOT NULL DEFAULT 1",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",'last_seen_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'forced_channels'=>['chat_id'=>"varchar(64) NOT NULL DEFAULT ''",'title'=>"varchar(255) NOT NULL DEFAULT ''",'join_url'=>"varchar(500) NOT NULL DEFAULT ''",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1",'sort_order'=>"int NOT NULL DEFAULT 100"],
+            'cards'=>['label'=>"varchar(255) NOT NULL DEFAULT ''",'holder_name'=>"varchar(255) NULL",'card_number'=>"varchar(64) NOT NULL DEFAULT ''",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1",'sort_order'=>"int NOT NULL DEFAULT 100"],
+            'categories'=>['title'=>"varchar(255) NOT NULL DEFAULT ''",'description'=>"text NULL",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1",'sort_order'=>"int NOT NULL DEFAULT 100"],
+            'products'=>['category_id'=>"int unsigned NULL",'title'=>"varchar(255) NOT NULL DEFAULT ''",'description'=>"text NULL",'price'=>"decimal(18,0) NOT NULL DEFAULT 0",'channel_id'=>"varchar(64) NOT NULL DEFAULT ''",'image_url'=>"varchar(1000) NULL",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1",'sort_order'=>"int NOT NULL DEFAULT 100",'invite_expire_hours'=>"int NOT NULL DEFAULT 168",'invite_max_uses'=>"int NOT NULL DEFAULT 2",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'orders'=>['user_id'=>"bigint unsigned NULL",'product_id'=>"int unsigned NULL",'amount'=>"decimal(18,0) NOT NULL DEFAULT 0",'status'=>"enum('creating','paid','failed','cancelled') NOT NULL DEFAULT 'creating'",'invite_link'=>"varchar(1000) NULL",'invite_expire_at'=>"datetime NULL",'invite_uses'=>"int NOT NULL DEFAULT 0",'max_invite_uses'=>"int NOT NULL DEFAULT 2",'invite_revoked'=>"tinyint(1) NOT NULL DEFAULT 0",'failure_reason'=>"text NULL",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",'paid_at'=>"datetime NULL"],
+            'invite_uses'=>['order_id'=>"bigint unsigned NULL",'user_telegram_id'=>"varchar(32) NOT NULL DEFAULT ''",'approved_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'topups'=>['user_id'=>"bigint unsigned NULL",'amount'=>"decimal(18,0) NOT NULL DEFAULT 0",'status'=>"enum('waiting_receipt','pending','approved','rejected','cancelled') NOT NULL DEFAULT 'waiting_receipt'",'desired_product_id'=>"int unsigned NULL",'receipt_file_id'=>"varchar(500) NULL",'receipt_type'=>"varchar(30) NULL",'receipt_caption'=>"text NULL",'reason'=>"text NULL",'reviewed_by'=>"varchar(32) NULL",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",'reviewed_at'=>"datetime NULL"],
+            'wallet_transactions'=>['user_id'=>"bigint unsigned NULL",'type'=>"varchar(30) NOT NULL DEFAULT ''",'amount'=>"decimal(18,0) NOT NULL DEFAULT 0",'reference_type'=>"varchar(30) NULL",'reference_id'=>"bigint NULL",'description'=>"varchar(255) NULL",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'tickets'=>['user_id'=>"bigint unsigned NULL",'status'=>"enum('open','closed') NOT NULL DEFAULT 'open'",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",'updated_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"],
+            'ticket_messages'=>['ticket_id'=>"bigint unsigned NULL",'sender_type'=>"enum('user','admin') NOT NULL DEFAULT 'user'",'message_type'=>"varchar(30) NOT NULL DEFAULT 'text'",'text'=>"text NULL",'file_id'=>"varchar(500) NULL",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'menus'=>['key'=>"varchar(100) NOT NULL DEFAULT ''",'label'=>"varchar(255) NOT NULL DEFAULT ''",'style'=>"varchar(20) NOT NULL DEFAULT ''",'action_type'=>"varchar(50) NOT NULL DEFAULT ''",'action_value'=>"text NULL",'row_no'=>"int NOT NULL DEFAULT 1",'sort_order'=>"int NOT NULL DEFAULT 100",'enabled'=>"tinyint(1) NOT NULL DEFAULT 1"],
+            'button_styles'=>['button_key'=>"varchar(120) NOT NULL DEFAULT ''",'label'=>"varchar(255) NOT NULL DEFAULT ''",'group_title'=>"varchar(255) NOT NULL DEFAULT ''",'style'=>"varchar(20) NOT NULL DEFAULT ''",'sort_order'=>"int NOT NULL DEFAULT 100"],
+            'texts'=>['key'=>"varchar(100) NOT NULL DEFAULT ''",'title'=>"varchar(255) NOT NULL DEFAULT ''",'value'=>"longtext NULL"],
+            'logs'=>['type'=>"varchar(80) NOT NULL DEFAULT ''",'message'=>"text NULL",'meta'=>"longtext NULL",'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            'webhook_updates'=>['created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+        ];
+        foreach($tables as $table=>$columns){
+            if(!$pdo->query("SHOW TABLES LIKE ".$pdo->quote($table))->fetch())continue;
+            foreach($columns as $column=>$definition){
+                if(!$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
+            }
+        }
+        self::expandEnum($pdo,'orders','status',['creating','paid','failed','cancelled'],'creating');
+        self::expandEnum($pdo,'topups','status',['waiting_receipt','pending','approved','rejected','cancelled'],'waiting_receipt');
+        self::expandEnum($pdo,'tickets','status',['open','closed'],'open');
+        self::expandEnum($pdo,'ticket_messages','sender_type',['user','admin'],'user');
+    }
+
+    private static function expandEnum(PDO $pdo,string $table,string $column,array $required,string $default): void
+    {
+        if(!$pdo->query("SHOW TABLES LIKE ".$pdo->quote($table))->fetch())return;
+        $info=$pdo->query("SHOW COLUMNS FROM `{$table}` LIKE ".$pdo->quote($column))->fetch();
+        $type=strtolower((string)($info['Type']??''));
+        if(!str_starts_with($type,'enum('))return;
+        preg_match_all("/'((?:[^'\\\\]|\\\\.)*)'/",$type,$matches);
+        $values=array_values(array_unique(array_merge($matches[1]??[],$required)));
+        $sql=implode(',',array_map(static fn(string $value):string=>$pdo->quote($value),$values));
+        $pdo->exec("ALTER TABLE `{$table}` MODIFY `{$column}` enum({$sql}) NOT NULL DEFAULT ".$pdo->quote($default));
     }
 
     private static function ensureMediaSchema(PDO $pdo): void
