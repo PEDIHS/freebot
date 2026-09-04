@@ -1,49 +1,23 @@
 #!/usr/bin/env bash
-set -u
+set -Eeuo pipefail
 
-APP_DIR="${APP_DIR:-/var/www/freebot}"
-DOMAIN="${DOMAIN:-}"
+INSTALL_DIR="${FREEBOT_INSTALL_DIR:-/var/www/freebot}"
+FAILURES=0
+pass(){ printf 'PASS  %s\n' "$1"; }
+fail(){ printf 'FAIL  %s\n' "$1"; FAILURES=$((FAILURES+1)); }
+check_cmd(){ command -v "$1" >/dev/null 2>&1 && pass "$1 available" || fail "$1 missing"; }
 
-ok(){ printf '[OK] %s\n' "$*"; }
-warn(){ printf '[WARN] %s\n' "$*"; }
-fail(){ printf '[FAIL] %s\n' "$*"; STATUS=1; }
-STATUS=0
-
-command -v nginx >/dev/null 2>&1 && ok "nginx installed" || fail "nginx missing"
-command -v php >/dev/null 2>&1 && ok "php $(php -r 'echo PHP_VERSION;')" || fail "php missing"
-php -r 'exit(function_exists("pcntl_fork") ? 0 : 1);' >/dev/null 2>&1 && ok "PHP pcntl available" || fail "PHP pcntl missing"
-command -v mariadb >/dev/null 2>&1 && ok "mariadb client installed" || fail "mariadb missing"
-command -v certbot >/dev/null 2>&1 && ok "certbot installed" || warn "certbot missing"
-command -v yt-dlp >/dev/null 2>&1 && ok "yt-dlp $(yt-dlp --version 2>/dev/null)" || fail "yt-dlp missing"
-command -v ffmpeg >/dev/null 2>&1 && ok "ffmpeg installed" || fail "ffmpeg missing"
-command -v aria2c >/dev/null 2>&1 && ok "aria2 installed" || fail "aria2 missing"
-command -v mediainfo >/dev/null 2>&1 && ok "mediainfo installed" || fail "mediainfo missing"
-
-[[ -f "$APP_DIR/index.php" ]] && ok "application files present" || fail "application missing in $APP_DIR"
-[[ -f "$APP_DIR/install/index.php" ]] && ok "web installer present" || fail "web installer missing"
-[[ -f "$APP_DIR/scripts/media-supervisor.php" ]] && ok "media supervisor present" || fail "media supervisor missing"
-[[ -f "$APP_DIR/scripts/media-worker.php" ]] && ok "media worker present" || fail "media worker missing"
-[[ -d "$APP_DIR/storage/downloads" ]] && ok "media download storage present" || fail "media download storage missing"
-[[ -d "$APP_DIR/storage" ]] && ok "storage present" || fail "storage missing"
-[[ -d "$APP_DIR/config" ]] && ok "config present" || fail "config missing"
-[[ -f /etc/cron.d/freebot ]] && ok "cron installed" || fail "cron missing"
-[[ -L /usr/local/sbin/freebot-update || -x /usr/local/sbin/freebot-update ]] && ok "freebot-update installed" || fail "updater missing"
-
-nginx -t >/dev/null 2>&1 && ok "nginx config valid" || fail "nginx config invalid"
-php -l "$APP_DIR/index.php" >/dev/null 2>&1 && ok "PHP entry point valid" || fail "PHP syntax check failed"
-
-if systemctl list-unit-files freebot-media.service >/dev/null 2>&1; then
-  systemctl is-active --quiet freebot-media.service && ok "freebot-media service active" || warn "freebot-media is installed but not active yet (before web install this can restart while waiting for config)"
+for cmd in php nginx mariadb aria2c ffmpeg mediainfo yt-dlp; do check_cmd "$cmd"; done
+php -r 'exit(version_compare(PHP_VERSION,"8.3.0",">=")?0:1);' && pass "PHP >= 8.3" || fail "PHP < 8.3"
+find "$INSTALL_DIR" -maxdepth 1 -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null && pass "PHP lint" || fail "PHP lint"
+nginx -t >/dev/null 2>&1 && pass "Nginx config" || fail "Nginx config"
+[[ -w "$INSTALL_DIR/storage/media" ]] && pass "Media storage writable" || fail "Media storage not writable"
+if [[ -f "$INSTALL_DIR/config.php" ]]; then
+  php -r '$c=require $argv[1];$d=$c["db"];$p=new PDO("mysql:host={$d["host"]};dbname={$d["name"]};charset=utf8mb4",$d["user"],$d["pass"]);foreach(["media_jobs","media_workers","media_job_events"] as $t){$p->query("SELECT 1 FROM `$t` LIMIT 1");}' "$INSTALL_DIR/config.php" && pass "Database and Media schema" || fail "Database or Media schema"
+  systemctl is-active --quiet 'freebot-download@1.service' && pass "Download worker" || fail "Download worker inactive"
+  systemctl is-active --quiet 'freebot-upload@1.service' && pass "Upload worker" || fail "Upload worker inactive"
 else
-  fail "freebot-media service missing"
+  echo "INFO  Web installer is not completed; database and worker runtime checks skipped."
 fi
-
-if [[ -n "$DOMAIN" ]]; then
-  if curl -fsSIL --max-time 10 "https://$DOMAIN/" >/dev/null; then
-    ok "HTTPS reachable: $DOMAIN"
-  else
-    warn "HTTPS is not reachable yet: $DOMAIN"
-  fi
-fi
-
-exit "$STATUS"
+((FAILURES==0)) || exit 1
+echo "FreeBot healthcheck passed."

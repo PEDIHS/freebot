@@ -1,0 +1,21 @@
+Options -Indexes
+DirectoryIndex index.php
+<FilesMatch "^(config\.php|app\.php|smart-payment\.php|media\.php|README_FA\.md|UPDATE_FA\.txt|VERSION|error_log|.*\.log|.*\.sql|.*\.bak|.*\.tmp)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+  </IfModule>
+</FilesMatch>
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^storage(?:/|$) - [F,L,NC]
+</IfModule>
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set X-Frame-Options "SAMEORIGIN"
+  Header always set Referrer-Policy "same-origin"
+  Header always set Permissions-Policy "camera=(), microphone=(), geolocation=()"
+</IfModule>

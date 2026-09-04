@@ -1,0 +1,7 @@
+/config.php
+/.env
+/storage/media/job_*/
+/storage/logs/
+*.log
+*.zip
+/.config.*.tmp
