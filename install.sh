@@ -19,76 +19,73 @@ fail(){ printf '\n[freebot] ERROR: %s\n' "$*" >&2; exit 1; }
 [[ "$EUID" -eq 0 ]] || fail "با root اجرا کن."
 command -v apt-get >/dev/null 2>&1 || fail "فعلاً Ubuntu/Debian پشتیبانی می‌شود."
 if [[ -z "$DOMAIN" && -t 0 ]]; then read -rp "دامنه ربات: " DOMAIN; fi
-[[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "DOMAIN معتبر نیست."
+[[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || fail "DOMAIN معتبر نیست. مثال: bot.example.com"
 [[ "$DB_NAME" =~ ^[A-Za-z0-9_]+$ ]] || fail "DB_NAME معتبر نیست."
 [[ "$DB_USER" =~ ^[A-Za-z0-9_]+$ ]] || fail "DB_USER معتبر نیست."
 
 log "نصب پیش‌نیازها"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y ca-certificates curl git rsync unzip zip nginx mariadb-server \
+apt-get install -y ca-certificates curl git rsync unzip zip patch nginx mariadb-server \
   php-fpm php-cli php-mysql php-curl php-zip php-mbstring php-xml php-intl \
-  certbot python3-certbot-nginx ffmpeg aria2 mediainfo jq python3 python3-venv
+  certbot python3-certbot-nginx ffmpeg aria2 mediainfo jq python3-venv
 systemctl enable --now nginx mariadb >/dev/null
 PHP_FPM_SERVICE="$(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service' | awk '{print $1}' | sort -V | tail -1)"
 [[ -n "$PHP_FPM_SERVICE" ]] || fail "PHP-FPM پیدا نشد."
 systemctl enable --now "$PHP_FPM_SERVICE" >/dev/null
 PHP_SOCKET="$(find /run/php -maxdepth 1 -type s -name 'php*-fpm.sock' | sort -V | tail -1)"
 [[ -S "$PHP_SOCKET" ]] || fail "سوکت PHP-FPM پیدا نشد."
+php -r 'exit(function_exists("pcntl_fork")?0:1);' || fail "افزونه pcntl در PHP CLI فعال نیست."
 
-log "نصب yt-dlp"
+log "نصب yt-dlp در محیط جداگانه"
 python3 -m venv /opt/freebot-tools
 /opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade pip yt-dlp
 ln -sfn /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-
-if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/release" && -f "$SOURCE_REPO_DIR/repair_release.py" ]]; then
-  REPO_DIR="$(cd "$SOURCE_REPO_DIR" && pwd)"
-  log "استفاده از repository محلی"
+if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/release" ]]; then
+  REPO_DIR="$SOURCE_REPO_DIR"
+  log "استفاده از clone محلی repository"
 else
-  log "دریافت repository از GitHub"
-  git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" \
-    || fail "git clone ناموفق بود."
   REPO_DIR="$TMP_DIR/repo"
+  log "دریافت repository از GitHub"
+  git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$REPO_DIR" \
+    || fail "git clone ناموفق بود."
 fi
-
 REL="$REPO_DIR/release"
-REPAIR="$REPO_DIR/repair_release.py"
-[[ -f "$REPAIR" ]] || fail "repair_release.py پیدا نشد."
 mkdir -p "$TMP_DIR/src"
 
-unpack_release(){
-  local prefix="$1" sha_file="$2" out="$3"
-  python3 "$REPAIR" "$REL" "$prefix" "$sha_file" "$TMP_DIR/$out" \
-    || fail "بازسازی $prefix ناموفق بود."
-  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" \
-    || fail "Extract $prefix ناموفق بود."
-}
+log "بازسازی نسخه پایه سالم"
+cat "$REL"/freebot.tar.gz.b64.part-* > "$TMP_DIR/freebot.b64" || fail "خواندن تکه‌های نسخه پایه ناموفق بود."
+base64 -d "$TMP_DIR/freebot.b64" > "$TMP_DIR/freebot.tar.gz" || fail "Decode نسخه پایه ناموفق بود."
+BASE_EXPECTED="$(awk '{print $1}' "$REL/freebot.tar.gz.sha256")"
+BASE_ACTUAL="$(sha256sum "$TMP_DIR/freebot.tar.gz" | awk '{print $1}')"
+[[ "$BASE_EXPECTED" == "$BASE_ACTUAL" ]] || fail "Checksum نسخه پایه معتبر نیست."
+tar -tzf "$TMP_DIR/freebot.tar.gz" >/dev/null || fail "نسخه پایه خراب است."
+tar -xzf "$TMP_DIR/freebot.tar.gz" -C "$TMP_DIR/src"
 
-log "بازسازی و اعتبارسنجی release"
-unpack_release "freebot.tar.gz" "freebot.tar.gz.sha256" "freebot.tar.gz"
-unpack_release "media-patch.tar.gz" "media-patch.tar.gz.sha256" "media-patch.tar.gz"
-if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then
-  unpack_release "media-hotfix.tar.gz" "media-hotfix.tar.gz.sha256" "media-hotfix.tar.gz"
-fi
+log "اعمال Media Overlay جدید"
+cat "$REL"/media-overlay.patch.gz.b64.part-* > "$TMP_DIR/media-overlay.b64" || fail "خواندن Media Overlay ناموفق بود."
+base64 -d "$TMP_DIR/media-overlay.b64" > "$TMP_DIR/media-overlay.patch.gz" || fail "Decode Media Overlay ناموفق بود."
+OVERLAY_EXPECTED="$(awk '{print $1}' "$REL/media-overlay.patch.gz.sha256")"
+OVERLAY_ACTUAL="$(sha256sum "$TMP_DIR/media-overlay.patch.gz" | awk '{print $1}')"
+[[ "$OVERLAY_EXPECTED" == "$OVERLAY_ACTUAL" ]] || fail "Checksum Media Overlay معتبر نیست."
+gzip -t "$TMP_DIR/media-overlay.patch.gz" || fail "Media Overlay خراب است."
+gzip -dc "$TMP_DIR/media-overlay.patch.gz" > "$TMP_DIR/media-overlay.patch"
+( cd "$TMP_DIR/src" && patch -p1 --batch --forward < "$TMP_DIR/media-overlay.patch" ) \
+  || fail "اعمال Media Overlay ناموفق بود."
 
-if [[ -f "$REPO_DIR/update.sh" ]]; then
-  mkdir -p "$TMP_DIR/src/scripts"
-  install -m 0755 "$REPO_DIR/update.sh" "$TMP_DIR/src/scripts/update.sh"
-fi
+mkdir -p "$TMP_DIR/src/scripts"
+install -m 0755 "$REPO_DIR/update.sh" "$TMP_DIR/src/scripts/update.sh"
 
 log "اعتبارسنجی سورس نهایی"
-required_files=(
-  "index.php" "webhook.php" "cron.php" "install/index.php" "app/bootstrap.php"
-  "database/schema.sql" "scripts/media-supervisor.php" "scripts/media-worker.php" "scripts/update.sh"
-)
-for required in "${required_files[@]}"; do
-  [[ -f "$TMP_DIR/src/$required" ]] || fail "فایل ضروری release موجود نیست: $required"
-done
+required=(index.php webhook.php cron.php install/index.php app/bootstrap.php app/MediaDownloader.php app/MediaQueue.php app/MediaWorker.php database/schema.sql scripts/media-supervisor.php scripts/media-worker.php scripts/migrate.php scripts/update.sh)
+for f in "${required[@]}"; do [[ -f "$TMP_DIR/src/$f" ]] || fail "فایل ضروری موجود نیست: $f"; done
 find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-install-php-lint.log 2>&1 \
-  || { cat /tmp/freebot-install-php-lint.log >&2; fail "PHP lint سورس release ناموفق بود."; }
+  || { cat /tmp/freebot-install-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
+php "$TMP_DIR/src/tests/run.php" >/tmp/freebot-install-tests.log 2>&1 \
+  || { tail -80 /tmp/freebot-install-tests.log >&2; fail "تست داخلی پروژه ناموفق بود."; }
 
 mkdir -p "$APP_DIR"
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
@@ -102,7 +99,7 @@ find "$APP_DIR" -type f -exec chmod 644 {} \;
 chown -R www-data:www-data "$APP_DIR/config" "$APP_DIR/storage"
 find "$APP_DIR/config" "$APP_DIR/storage" -type d -exec chmod 750 {} \;
 find "$APP_DIR/config" "$APP_DIR/storage" -type f -exec chmod 640 {} \;
-chmod +x "$APP_DIR/install.sh" "$APP_DIR/scripts/"*.sh 2>/dev/null || true
+chmod +x "$APP_DIR/scripts/"*.php "$APP_DIR/scripts/"*.sh 2>/dev/null || true
 
 if [[ "$SKIP_DB" != "1" ]]; then
   log "آماده‌سازی دیتابیس"
@@ -196,7 +193,7 @@ fi
 if [[ "$SKIP_SSL" != "1" ]]; then
   log "دریافت SSL"
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect \
-    || log "SSL صادر نشد؛ بعداً اجرا کن: certbot --nginx -d $DOMAIN"
+    || log "SSL صادر نشد؛ پس از تنظیم DNS اجرا کن: certbot --nginx -d $DOMAIN"
 fi
 
 log "نصب کامل شد"
