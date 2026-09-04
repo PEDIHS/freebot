@@ -14,6 +14,7 @@ runuser -u www-data -- git -C "$INSTALL_DIR" merge --ff-only origin/main
 chown -R www-data:www-data "$INSTALL_DIR"
 install -d -o www-data -g www-data -m 0750 "$INSTALL_DIR/storage/media"
 if [[ -f "$INSTALL_DIR/config.php" ]]; then
+  # shellcheck disable=SC2016
   runuser -u www-data -- /usr/bin/php -r 'require $argv[1]; App::db();' "$INSTALL_DIR/app.php"
 fi
 systemctl daemon-reload
