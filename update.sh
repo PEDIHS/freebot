@@ -8,9 +8,9 @@ INSTALL_DIR="${FREEBOT_INSTALL_DIR:-/var/www/freebot}"
 BACKUP_DIR="/var/backups/freebot/$(date -u +%Y%m%dT%H%M%SZ)"
 install -d -m 0700 "$BACKUP_DIR"
 if [[ -f "$INSTALL_DIR/config.php" ]]; then install -m 0600 "$INSTALL_DIR/config.php" "$BACKUP_DIR/config.php"; fi
-git -C "$INSTALL_DIR" diff > "$BACKUP_DIR/local-changes.patch" || true
-git -C "$INSTALL_DIR" fetch --prune origin main
-git -C "$INSTALL_DIR" merge --ff-only origin/main
+sudo -u www-data git -C "$INSTALL_DIR" diff > "$BACKUP_DIR/local-changes.patch" || true
+sudo -u www-data git -C "$INSTALL_DIR" fetch --prune origin main
+sudo -u www-data git -C "$INSTALL_DIR" merge --ff-only origin/main
 chown -R www-data:www-data "$INSTALL_DIR"
 install -d -o www-data -g www-data -m 0750 "$INSTALL_DIR/storage/media"
 if [[ -f "$INSTALL_DIR/config.php" ]]; then
