@@ -17,7 +17,9 @@ DOMAIN=bot.example.com SKIP_DB=1 \
 bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
 ```
 
-Bootstrap به‌صورت خودکار Nginx، PHP-FPM، MariaDB، Certbot، Cron و مسیرهای runtime را آماده می‌کند و سپس Installer وب در این آدرس در دسترس است:
+Bootstrap به‌صورت خودکار Nginx، PHP-FPM، MariaDB، Certbot، Cron و مسیرهای runtime را آماده می‌کند، release اصلی و overlay را با SHA-256 بررسی می‌کند و سپس آخرین Hotfix موتور Worker را نیز با checksum مستقل اعمال می‌کند.
+
+بعد از آماده‌شدن زیرساخت، Installer وب در این آدرس در دسترس است:
 
 ```text
 https://YOUR-DOMAIN/install/
@@ -25,7 +27,7 @@ https://YOUR-DOMAIN/install/
 
 ## موتور حرفه‌ای دانلود و آپلود
 
-نسخه `1.9.0-media-workers` شامل یک صف DB-backed و دو Pool مستقل Worker است:
+نسخه `1.9.1-media-workers` شامل یک صف DB-backed و دو Pool مستقل Worker است:
 
 - Download Workers و Upload Workers جدا از هم
 - دانلود و آپلود چند فیلم به‌صورت هم‌زمان
@@ -34,6 +36,7 @@ https://YOUR-DOMAIN/install/
 - بازیابی Jobهای گیرکرده یا Workerهای stale
 - نمایش درصد، حجم منتقل‌شده و سرعت لحظه‌ای Download/Upload در پنل بدون Refresh
 - Supervisor دائمی تحت systemd با Restart خودکار
+- ظرفیت Workerها بر اساس تعداد Worker فعال و Jobهای منتظر به‌صورت واقعی پر می‌شود
 - فایل‌های ارسالی از این موتور بدون Caption ارسال می‌شوند
 - حذف خودکار فایل محلی پس از Upload به‌صورت پیش‌فرض، با گزینه Keep Files در پنل
 
@@ -107,7 +110,7 @@ journalctl -u freebot-media -f
 freebot-update
 ```
 
-Updater release و overlay را با SHA-256 اعتبارسنجی می‌کند، PHP lint انجام می‌دهد، backup می‌گیرد، migration دیتابیس را اجرا می‌کند و اطلاعات runtime را حفظ می‌کند، از جمله:
+Updater release، overlay و Hotfix را با SHA-256 اعتبارسنجی می‌کند، PHP lint انجام می‌دهد، backup می‌گیرد، migration دیتابیس را اجرا می‌کند و اطلاعات runtime را حفظ می‌کند، از جمله:
 
 - `config/app.php`
 - `storage/installed.lock`
@@ -136,7 +139,7 @@ freebot-health
 DOMAIN=bot.example.com freebot-health
 ```
 
-Health check سرویس‌ها، PHP/pcntl و ابزارهای دانلود را نیز بررسی می‌کند.
+Health check سرویس‌ها، PHP/pcntl، Nginx، Worker Supervisor و ابزارهای دانلود را بررسی می‌کند.
 
 ## مسیر پیش‌فرض
 
