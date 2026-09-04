@@ -19,4 +19,12 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh -o "$TMP"
 bash -n "$TMP"
-exec bash "$TMP"
+bash "$TMP"
+
+log "نصب health-check"
+curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/healthcheck.sh -o /usr/local/sbin/freebot-health
+chmod 0755 /usr/local/sbin/freebot-health
+
+printf '\nدستورات مدیریت:\n'
+printf '  freebot-update   # دریافت آخرین نسخه پروژه\n'
+printf '  freebot-health   # تست سرویس‌ها، PHP و ابزارهای رسانه\n'
