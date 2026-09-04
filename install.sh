@@ -48,10 +48,13 @@ ln -sf /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 log "دریافت نسخه منتشرشده از GitHub"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-BUNDLE_URL="https://raw.githubusercontent.com/PEDIHS/freebot/main/release/freebot.tar.gz"
 SHA_URL="https://raw.githubusercontent.com/PEDIHS/freebot/main/release/freebot.tar.gz.sha256"
-curl -fsSL "$BUNDLE_URL" -o "$TMP_DIR/freebot.tar.gz"
 curl -fsSL "$SHA_URL" -o "$TMP_DIR/freebot.tar.gz.sha256"
+: > "$TMP_DIR/freebot.tar.gz.b64"
+for part in $(seq -w 0 11); do
+  curl -fsSL "https://raw.githubusercontent.com/PEDIHS/freebot/main/release/freebot.tar.gz.b64.part-${part}" >> "$TMP_DIR/freebot.tar.gz.b64"
+done
+base64 -d "$TMP_DIR/freebot.tar.gz.b64" > "$TMP_DIR/freebot.tar.gz"
 EXPECTED_SHA="$(awk '{print $1}' "$TMP_DIR/freebot.tar.gz.sha256")"
 ACTUAL_SHA="$(sha256sum "$TMP_DIR/freebot.tar.gz" | awk '{print $1}')"
 [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" == "$ACTUAL_SHA" ]] || fail "Checksum بسته انتشار معتبر نیست."
@@ -75,6 +78,7 @@ mkdir -p \
   "$APP_DIR/storage/source_queue/failed" \
   "$APP_DIR/storage/source_queue/done"
 
+# Application code is read-only to the web worker. Only runtime state is writable.
 chown -R root:root "$APP_DIR"
 find "$APP_DIR" -type d -exec chmod 755 {} \;
 find "$APP_DIR" -type f -exec chmod 644 {} \;
