@@ -1,118 +1,117 @@
 # FreeBot
 
-ربات PHP + Telegram Webhook با پنل مدیریت، نصبگر وب، Cron، MariaDB و قابلیت به‌روزرسانی از GitHub.
+ربات PHP + Telegram Webhook با پنل مدیریت، نصبگر وب، Cron، MariaDB، SSL و قابلیت آپدیت از GitHub.
 
 ## نصب کامل روی Ubuntu/Debian با یک دستور
 
-به‌عنوان root اجرا کنید:
+به‌عنوان `root` اجرا کن:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
 ```
 
-اسکریپت این موارد را آماده می‌کند:
+Bootstrap این موارد را آماده می‌کند:
 
 - Nginx
 - PHP-FPM و افزونه‌های لازم
 - MariaDB
 - Certbot / Let's Encrypt
 - Cron هر دقیقه
-- مسیرهای `config` و `storage`
-- Permissionهای امن
-- `yt-dlp` در Python venv مجزا
+- مسیرهای runtime و Permissionهای مناسب
+- `yt-dlp` داخل Python venv مجزا
 - `ffmpeg`
 - `aria2`
-- دستور `freebot-update` برای آپدیت نسخه نصب‌شده
+- `mediainfo`
+- `jq` و ابزارهای پایه سرور
+- `freebot-update` برای دریافت نسخه‌های جدید
+- `freebot-health` برای تست کامل نصب
 
-در پایان آدرس زیر نمایش داده می‌شود:
+در حین نصب دامنه را وارد می‌کنی. اگر DNS به IP همین سرور اشاره کند، Certbot برای همان دامنه SSL می‌گیرد.
+
+در پایان Installer وب از مسیر زیر در دسترس است:
 
 ```text
 https://YOUR-DOMAIN/install/
 ```
 
-## دیتابیس از قبل ساخته‌شده
+Installer وب جداول دیتابیس، `config/app.php`، حساب مدیر، Webhook Secret، Cron Secret و `storage/installed.lock` را می‌سازد.
 
-اگر دیتابیس و کاربر `freebot` را قبلاً ساخته‌اید:
-
-```bash
-DOMAIN=bot.example.com SKIP_DB=1 AUTO_UPDATE=1 \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh)
-```
-
-سپس در Installer وب وارد کنید:
-
-```text
-Host: localhost
-Port: 3306
-Database: freebot
-User: freebot
-Password: رمز همان کاربر MariaDB
-```
-
-## ساخت خودکار دیتابیس
-
-```bash
-DOMAIN=bot.example.com \
-DB_NAME=freebot \
-DB_USER=freebot \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh)
-```
-
-اگر دیتابیس توسط اسکریپت ساخته شود، مشخصات آن فقط روی سرور در این فایل ذخیره می‌شود:
+اگر دیتابیس توسط bootstrap ساخته شود، مشخصات آن فقط روی خود سرور در این فایل ذخیره می‌شود:
 
 ```text
 /root/.freebot/install-credentials.txt
 ```
 
+## اگر دیتابیس را از قبل ساخته‌ای
+
+مثلاً اگر دیتابیس و کاربر را قبلاً ساخته‌ای:
+
+```bash
+DOMAIN=bot.example.com SKIP_DB=1 \
+bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
+```
+
+بعد همان اطلاعات دیتابیس را در `/install/` وارد کن.
+
 ## اگر DNS هنوز آماده نیست
 
 ```bash
-DOMAIN=bot.example.com SKIP_DB=1 SKIP_SSL=1 AUTO_UPDATE=1 \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh)
+DOMAIN=bot.example.com SKIP_SSL=1 \
+bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/bootstrap.sh)
 ```
 
-بعد از تنظیم DNS:
+و بعد از تنظیم DNS:
 
 ```bash
 certbot --nginx -d bot.example.com
 ```
 
-## آپدیت
-
-آپدیت دستی:
+## آپدیت پروژه
 
 ```bash
 freebot-update
 ```
 
-Updater نسخه انتشار GitHub را دریافت و با SHA-256 اعتبارسنجی می‌کند. قبل از جایگزینی فایل‌ها backup و PHP lint انجام می‌شود و در صورت نصب بودن برنامه migration دیتابیس نیز اجرا می‌شود.
-
-این داده‌ها در آپدیت حفظ می‌شوند:
+Updater نسخه انتشار GitHub را دریافت و اعتبارسنجی می‌کند و داده‌های runtime را حفظ می‌کند، از جمله:
 
 - `config/app.php`
 - `storage/installed.lock`
 - Queueها
 - Logها
 - Backupها
-- تنظیمات و دیتابیس نصب‌شده
+- تنظیمات نصب‌شده و دیتابیس
 
-برای فعال‌سازی بررسی خودکار هر 5 دقیقه هنگام نصب:
+## تست سلامت نصب
 
 ```bash
-DOMAIN=bot.example.com AUTO_UPDATE=1 \
-bash <(curl -fsSL https://raw.githubusercontent.com/PEDIHS/freebot/main/install.sh)
+freebot-health
 ```
 
-## دانلود رسانه
+یا برای تست HTTPS دامنه:
 
-زیرساخت سرور `yt-dlp + ffmpeg + aria2` را نصب می‌کند و کلاس `MediaDownloader` برای دریافت رسانه‌های عمومی در برنامه موجود است. URLهای private/reserved مسدود شده‌اند و این لایه برای دورزدن DRM، کوکی خصوصی یا محدودیت دسترسی طراحی نشده است.
+```bash
+DOMAIN=bot.example.com freebot-health
+```
 
-## مسیر پیش‌فرض
+## دانلود و پردازش رسانه
+
+زیرساخت سرور برای دریافت و پردازش رسانه‌های عمومی و بدون DRM این ابزارها را نصب می‌کند:
+
+- `yt-dlp` برای استخراج و دانلود از منابع پشتیبانی‌شده
+- `ffmpeg` برای remux/transcode و پردازش صوت/ویدئو
+- `aria2c` برای دانلود سریع و چنداتصاله فایل‌های مستقیم
+- `mediainfo` برای تشخیص codec، container، bitrate و metadata
+
+کلاس `MediaDownloader` داخل پروژه برای استفاده برنامه از این ابزارها در نظر گرفته شده است. این لایه برای دورزدن DRM، احراز هویت خصوصی یا کنترل دسترسی طراحی نشده است.
+
+## مسیر پیش‌فرض پروژه
 
 ```text
 /var/www/freebot
 ```
 
-## نیازمندی DNS
+## ریپازیتوری
 
-قبل از گرفتن SSL، رکورد A دامنه باید به IP همین سرور اشاره کند. Telegram Webhook برای نصب نهایی به HTTPS معتبر نیاز دارد.
+```text
+https://github.com/PEDIHS/freebot
+```
