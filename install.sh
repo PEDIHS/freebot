@@ -11,6 +11,7 @@ DB_PASS="${DB_PASS:-}"
 SKIP_DB="${SKIP_DB:-0}"
 SKIP_SSL="${SKIP_SSL:-0}"
 AUTO_UPDATE="${AUTO_UPDATE:-0}"
+SOURCE_REPO_DIR="${SOURCE_REPO_DIR:-}"
 
 log(){ printf '\n[freebot] %s\n' "$*"; }
 fail(){ printf '\n[freebot] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -27,7 +28,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ca-certificates curl git rsync unzip zip nginx mariadb-server \
   php-fpm php-cli php-mysql php-curl php-zip php-mbstring php-xml php-intl \
-  certbot python3-certbot-nginx ffmpeg aria2 mediainfo jq python3-venv
+  certbot python3-certbot-nginx ffmpeg aria2 mediainfo jq python3 python3-venv
 systemctl enable --now nginx mariadb >/dev/null
 PHP_FPM_SERVICE="$(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service' | awk '{print $1}' | sort -V | tail -1)"
 [[ -n "$PHP_FPM_SERVICE" ]] || fail "PHP-FPM پیدا نشد."
@@ -40,54 +41,48 @@ python3 -m venv /opt/freebot-tools
 /opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade pip yt-dlp
 ln -sfn /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 
-log "دریافت repository از GitHub"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
-git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" \
-  || fail "git clone ناموفق بود."
-REL="$TMP_DIR/repo/release"
+
+if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/release" && -f "$SOURCE_REPO_DIR/repair_release.py" ]]; then
+  REPO_DIR="$(cd "$SOURCE_REPO_DIR" && pwd)"
+  log "استفاده از repository محلی"
+else
+  log "دریافت repository از GitHub"
+  git -c http.version=HTTP/1.1 clone --depth 1 --single-branch --branch "$BRANCH" "$REPO_URL" "$TMP_DIR/repo" \
+    || fail "git clone ناموفق بود."
+  REPO_DIR="$TMP_DIR/repo"
+fi
+
+REL="$REPO_DIR/release"
+REPAIR="$REPO_DIR/repair_release.py"
+[[ -f "$REPAIR" ]] || fail "repair_release.py پیدا نشد."
 mkdir -p "$TMP_DIR/src"
 
 unpack_release(){
-  local prefix="$1" out="$2"
-  local parts=()
-  shopt -s nullglob
-  parts=("$REL/${prefix}.b64.part-"*)
-  shopt -u nullglob
-  (( ${#parts[@]} > 0 )) || fail "تکه‌های $prefix پیدا نشد."
-
-  : > "$TMP_DIR/${prefix}.b64"
-  cat "${parts[@]}" >> "$TMP_DIR/${prefix}.b64" || fail "خواندن تکه‌های $prefix ناموفق بود."
-  base64 -d "$TMP_DIR/${prefix}.b64" > "$TMP_DIR/$out" || fail "Decode $prefix ناموفق بود."
-  [[ -s "$TMP_DIR/$out" ]] || fail "آرشیو $prefix خالی است."
-  tar -tzf "$TMP_DIR/$out" >/dev/null 2>&1 || fail "آرشیو $prefix خراب یا ناقص است."
-  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" || fail "Extract $prefix ناموفق بود."
+  local prefix="$1" sha_file="$2" out="$3"
+  python3 "$REPAIR" "$REL" "$prefix" "$sha_file" "$TMP_DIR/$out" \
+    || fail "بازسازی $prefix ناموفق بود."
+  tar -xzf "$TMP_DIR/$out" -C "$TMP_DIR/src" \
+    || fail "Extract $prefix ناموفق بود."
 }
 
-log "بازسازی release به صورت محلی"
-unpack_release "freebot.tar.gz" "freebot.tar.gz"
-unpack_release "media-patch.tar.gz" "media-patch.tar.gz"
+log "بازسازی و اعتبارسنجی release"
+unpack_release "freebot.tar.gz" "freebot.tar.gz.sha256" "freebot.tar.gz"
+unpack_release "media-patch.tar.gz" "media-patch.tar.gz.sha256" "media-patch.tar.gz"
 if compgen -G "$REL/media-hotfix.tar.gz.b64.part-*" >/dev/null; then
-  unpack_release "media-hotfix.tar.gz" "media-hotfix.tar.gz"
+  unpack_release "media-hotfix.tar.gz" "media-hotfix.tar.gz.sha256" "media-hotfix.tar.gz"
 fi
 
-# آخرین updater همیشه از root ریپو گرفته می‌شود تا نصب‌های قدیمی نیز مسیر آپدیت جدید را دریافت کنند.
-if [[ -f "$TMP_DIR/repo/update.sh" ]]; then
+if [[ -f "$REPO_DIR/update.sh" ]]; then
   mkdir -p "$TMP_DIR/src/scripts"
-  install -m 0755 "$TMP_DIR/repo/update.sh" "$TMP_DIR/src/scripts/update.sh"
+  install -m 0755 "$REPO_DIR/update.sh" "$TMP_DIR/src/scripts/update.sh"
 fi
 
 log "اعتبارسنجی سورس نهایی"
 required_files=(
-  "index.php"
-  "webhook.php"
-  "cron.php"
-  "install/index.php"
-  "app/bootstrap.php"
-  "database/schema.sql"
-  "scripts/media-supervisor.php"
-  "scripts/media-worker.php"
-  "scripts/update.sh"
+  "index.php" "webhook.php" "cron.php" "install/index.php" "app/bootstrap.php"
+  "database/schema.sql" "scripts/media-supervisor.php" "scripts/media-worker.php" "scripts/update.sh"
 )
 for required in "${required_files[@]}"; do
   [[ -f "$TMP_DIR/src/$required" ]] || fail "فایل ضروری release موجود نیست: $required"
@@ -169,6 +164,7 @@ cat > /etc/systemd/system/freebot-media.service <<SERVICE
 Description=FreeBot Media Download/Upload Supervisor
 After=network-online.target mariadb.service
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=www-data
@@ -182,6 +178,7 @@ TimeoutStopSec=15
 Nice=5
 NoNewPrivileges=true
 PrivateTmp=true
+
 [Install]
 WantedBy=multi-user.target
 SERVICE
@@ -199,7 +196,7 @@ fi
 if [[ "$SKIP_SSL" != "1" ]]; then
   log "دریافت SSL"
   certbot --nginx -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email --redirect \
-    || log "SSL صادر نشد؛ بعداً: certbot --nginx -d $DOMAIN"
+    || log "SSL صادر نشد؛ بعداً اجرا کن: certbot --nginx -d $DOMAIN"
 fi
 
 log "نصب کامل شد"
