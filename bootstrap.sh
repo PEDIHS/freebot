@@ -15,7 +15,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || tr
 REPO_DIR=""
 TMP=""
 
-if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -f "$SCRIPT_DIR/healthcheck.sh" ]]; then
+if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/install.sh" && -f "$SCRIPT_DIR/healthcheck.sh" && -f "$SCRIPT_DIR/repair_release.py" ]]; then
   REPO_DIR="$SCRIPT_DIR"
   log "استفاده از clone محلی موجود"
 else
@@ -28,7 +28,7 @@ else
 fi
 
 log "اجرای Installer محلی"
-bash "$REPO_DIR/install.sh"
+SOURCE_REPO_DIR="$REPO_DIR" bash "$REPO_DIR/install.sh"
 install -m 0755 "$REPO_DIR/healthcheck.sh" /usr/local/sbin/freebot-health
 
 printf '\nدستورات مدیریت:\n'
