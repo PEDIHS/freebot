@@ -148,6 +148,7 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.0.1-media-migration') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -178,8 +179,28 @@ final class App
             INDEX idx_media_batch_product(product_id),
             CONSTRAINT fk_media_batch_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        if(!$pdo->query("SHOW COLUMNS FROM media_batches LIKE 'notification_status'")->fetch())$pdo->exec("ALTER TABLE media_batches ADD COLUMN notification_status varchar(30) NULL AFTER completed_at");
-        if(!$pdo->query("SHOW COLUMNS FROM media_batches LIKE 'notification_sent_at'")->fetch())$pdo->exec("ALTER TABLE media_batches ADD COLUMN notification_sent_at datetime NULL AFTER notification_status");
+        $batchColumns=[
+            'product_id'=>"int unsigned NULL",
+            'channel_id'=>"varchar(64) NOT NULL DEFAULT ''",
+            'title'=>"varchar(255) NOT NULL DEFAULT ''",
+            'caption_template'=>"text NULL",
+            'upload_mode'=>"enum('auto','video','document') NOT NULL DEFAULT 'auto'",
+            'status'=>"enum('queued','running','paused','completed','completed_with_errors','cancelled') NOT NULL DEFAULT 'queued'",
+            'total_items'=>"int unsigned NOT NULL DEFAULT 0",
+            'completed_items'=>"int unsigned NOT NULL DEFAULT 0",
+            'failed_items'=>"int unsigned NOT NULL DEFAULT 0",
+            'current_item_id'=>"bigint unsigned NULL",
+            'created_by'=>"varchar(64) NOT NULL DEFAULT 'panel'",
+            'started_at'=>"datetime NULL",
+            'completed_at'=>"datetime NULL",
+            'notification_status'=>"varchar(30) NULL",
+            'notification_sent_at'=>"datetime NULL",
+            'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            'updated_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+        ];
+        foreach($batchColumns as $column=>$definition){
+            if(!$pdo->query("SHOW COLUMNS FROM media_batches LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_batches ADD COLUMN `{$column}` {$definition}");
+        }
         $pdo->exec("CREATE TABLE IF NOT EXISTS media_jobs (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             batch_id bigint unsigned NOT NULL,
@@ -218,28 +239,61 @@ final class App
             INDEX idx_media_job_pick(status,next_attempt_at,lock_expires_at,id),
             CONSTRAINT fk_media_job_batch FOREIGN KEY(batch_id) REFERENCES media_batches(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        // Some 1.x installations already have a media_jobs table with only a
+        // subset of these fields. Add every runtime field independently and do
+        // not rely on AFTER clauses, because their anchor may also be missing.
         $jobColumns=[
-            'download_attempts'=>"tinyint unsigned NOT NULL DEFAULT 0 AFTER attempts",
-            'upload_attempts'=>"tinyint unsigned NOT NULL DEFAULT 0 AFTER download_attempts",
-            'download_speed_bps'=>"bigint unsigned NOT NULL DEFAULT 0 AFTER total_bytes",
-            'upload_speed_bps'=>"bigint unsigned NOT NULL DEFAULT 0 AFTER download_speed_bps",
-            'eta_seconds'=>"int unsigned NULL AFTER upload_speed_bps",
-            'locked_by'=>"varchar(190) NULL AFTER error_message",
-            'lock_token'=>"char(64) NULL AFTER locked_by",
-            'lock_expires_at'=>"datetime NULL AFTER lock_token",
-            'heartbeat_at'=>"datetime NULL AFTER lock_expires_at",
+            'batch_id'=>"bigint unsigned NULL",
+            'position'=>"int unsigned NOT NULL DEFAULT 0",
+            'source_url'=>"text NULL",
+            'source_host'=>"varchar(255) NOT NULL DEFAULT ''",
+            'detected_title'=>"varchar(500) NULL",
+            'engine'=>"varchar(50) NULL",
+            'status'=>"enum('queued','downloading','downloaded','uploading','completed','failed','cancelled') NOT NULL DEFAULT 'queued'",
+            'progress'=>"decimal(5,2) NOT NULL DEFAULT 0",
+            'attempts'=>"tinyint unsigned NOT NULL DEFAULT 0",
+            'download_attempts'=>"tinyint unsigned NOT NULL DEFAULT 0",
+            'upload_attempts'=>"tinyint unsigned NOT NULL DEFAULT 0",
+            'max_attempts'=>"tinyint unsigned NOT NULL DEFAULT 3",
+            'next_attempt_at'=>"datetime NULL",
+            'downloaded_bytes'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'total_bytes'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'download_speed_bps'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'upload_speed_bps'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'eta_seconds'=>"int unsigned NULL",
+            'file_path'=>"varchar(1000) NULL",
+            'file_name'=>"varchar(500) NULL",
+            'mime_type'=>"varchar(120) NULL",
+            'telegram_message_id'=>"bigint NULL",
+            'error_code'=>"varchar(80) NULL",
+            'error_message'=>"text NULL",
+            'locked_by'=>"varchar(190) NULL",
+            'lock_token'=>"char(64) NULL",
+            'lock_expires_at'=>"datetime NULL",
+            'heartbeat_at'=>"datetime NULL",
+            'started_at'=>"datetime NULL",
+            'finished_at'=>"datetime NULL",
+            'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            'updated_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
         ];
         foreach($jobColumns as $column=>$definition){
-            if(!$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_jobs ADD COLUMN {$column} {$definition}");
+            if(!$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_jobs ADD COLUMN `{$column}` {$definition}");
         }
         $statusColumn=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'status'")->fetch();
         $statusType=strtolower((string)($statusColumn['Type']??''));
-        if(str_contains($statusType,"'done'")||str_contains($statusType,"'retry_wait'")||str_contains($statusType,"'resolving'")){
-            $pdo->exec("ALTER TABLE media_jobs MODIFY status enum('queued','resolving','downloading','downloaded','uploading','retry_wait','done','completed','failed','cancelled') NOT NULL DEFAULT 'queued'");
-            $pdo->exec("UPDATE media_jobs SET status='completed' WHERE status='done'");
-            $pdo->exec("UPDATE media_jobs SET status='queued',next_attempt_at=COALESCE(next_attempt_at,NOW()) WHERE status IN ('retry_wait','resolving')");
-            $pdo->exec("ALTER TABLE media_jobs MODIFY status enum('queued','downloading','downloaded','uploading','completed','failed','cancelled') NOT NULL DEFAULT 'queued'");
-        }
+        $finalStatuses=['queued','downloading','downloaded','uploading','completed','failed','cancelled'];
+        preg_match_all("/'((?:[^'\\\\]|\\\\.)*)'/",$statusType,$statusMatches);
+        $transitionStatuses=array_values(array_unique(array_merge($finalStatuses,$statusMatches[1]??[])));
+        $transitionSql=implode(',',array_map(static fn(string $status):string=>$pdo->quote($status),$transitionStatuses));
+        $finalStatusSql=implode(',',array_map(static fn(string $status):string=>$pdo->quote($status),$finalStatuses));
+        $pdo->exec("ALTER TABLE media_jobs MODIFY status enum({$transitionSql}) NOT NULL DEFAULT 'queued'");
+        $pdo->exec("UPDATE media_jobs SET status='completed' WHERE status='done'");
+        $pdo->exec("UPDATE media_jobs SET status='queued',next_attempt_at=COALESCE(next_attempt_at,NOW()) WHERE status IN ('retry_wait','resolving','pending','processing')");
+        $pdo->exec("UPDATE media_jobs SET status='failed',error_code=COALESCE(error_code,'LEGACY_STATUS'),error_message=COALESCE(error_message,'وضعیت قدیمی Job هنگام ارتقا قابل بازیابی نبود.') WHERE status NOT IN ({$finalStatusSql})");
+        $pdo->exec("UPDATE media_jobs SET status='failed',error_code=COALESCE(error_code,'LEGACY_ROW'),error_message=COALESCE(error_message,'اطلاعات Job قدیمی ناقص است.') WHERE batch_id IS NULL OR source_url IS NULL OR TRIM(source_url)=''");
+        $pdo->exec("ALTER TABLE media_jobs MODIFY status enum({$finalStatusSql}) NOT NULL DEFAULT 'queued'");
+        $indexExists=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_jobs' AND index_name='idx_media_job_pick_v2' LIMIT 1")->fetch();
+        if(!$indexExists)$pdo->exec("CREATE INDEX idx_media_job_pick_v2 ON media_jobs(status,next_attempt_at,lock_expires_at,id)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS media_job_events (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             job_id bigint unsigned NOT NULL,
@@ -251,6 +305,17 @@ final class App
             INDEX idx_media_event_job(job_id,id),
             CONSTRAINT fk_media_event_job FOREIGN KEY(job_id) REFERENCES media_jobs(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $eventColumns=[
+            'job_id'=>"bigint unsigned NULL",
+            'level'=>"enum('info','warning','error','success') NOT NULL DEFAULT 'info'",
+            'stage'=>"varchar(50) NOT NULL DEFAULT ''",
+            'message'=>"text NULL",
+            'meta'=>"longtext NULL",
+            'created_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        ];
+        foreach($eventColumns as $column=>$definition){
+            if(!$pdo->query("SHOW COLUMNS FROM media_job_events LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_job_events ADD COLUMN `{$column}` {$definition}");
+        }
         $pdo->exec("CREATE TABLE IF NOT EXISTS media_workers (
             worker_id varchar(190) PRIMARY KEY,
             role enum('download','upload') NOT NULL,
@@ -266,6 +331,21 @@ final class App
             INDEX idx_media_worker_live(role,heartbeat_at),
             CONSTRAINT fk_media_worker_job FOREIGN KEY(current_job_id) REFERENCES media_jobs(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $workerColumns=[
+            'role'=>"enum('download','upload') NOT NULL DEFAULT 'download'",
+            'hostname'=>"varchar(190) NOT NULL DEFAULT ''",
+            'pid'=>"int unsigned NOT NULL DEFAULT 0",
+            'status'=>"enum('starting','idle','busy','stopping','stopped','error') NOT NULL DEFAULT 'starting'",
+            'current_job_id'=>"bigint unsigned NULL",
+            'jobs_processed'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'last_error'=>"text NULL",
+            'started_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            'heartbeat_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP",
+            'updated_at'=>"datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP",
+        ];
+        foreach($workerColumns as $column=>$definition){
+            if(!$pdo->query("SHOW COLUMNS FROM media_workers LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_workers ADD COLUMN `{$column}` {$definition}");
+        }
         $pdo->exec("CREATE TABLE IF NOT EXISTS channel_posts (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             chat_id varchar(64) NOT NULL,
