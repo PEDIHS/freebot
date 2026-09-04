@@ -1,0 +1,41 @@
+name: FreeBot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  php-and-installer:
+    runs-on: ubuntu-24.04
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: '1'
+          MARIADB_DATABASE: freebot_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: curl, mbstring, pdo_mysql, openssl, json, fileinfo
+      - name: PHP lint
+        run: find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Installer tests
+        run: bash tests/installer_test.sh
+      - name: Media Queue and Worker tests
+        env:
+          FREEBOT_TEST_DSN: mysql:host=127.0.0.1;port=3306;dbname=freebot_test;charset=utf8mb4
+          FREEBOT_TEST_USER: root
+          FREEBOT_TEST_PASS: ''
+        run: php tests/queue_test.php
