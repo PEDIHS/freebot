@@ -13,8 +13,12 @@ git -C "$INSTALL_DIR" fetch --prune origin main
 git -C "$INSTALL_DIR" merge --ff-only origin/main
 chown -R www-data:www-data "$INSTALL_DIR"
 install -d -o www-data -g www-data -m 0750 "$INSTALL_DIR/storage/media"
+if [[ -f "$INSTALL_DIR/config.php" ]]; then
+  sudo -u www-data /usr/bin/php -r 'require $argv[1]; App::db();' "$INSTALL_DIR/app.php"
+fi
 systemctl daemon-reload
 systemctl restart php8.3-fpm nginx
 systemctl restart 'freebot-download@*.service' 'freebot-upload@*.service' || true
+sleep 3
 "$INSTALL_DIR/healthcheck.sh"
 echo "Updated to $(cat "$INSTALL_DIR/VERSION"). Backup: $BACKUP_DIR"

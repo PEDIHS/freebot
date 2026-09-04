@@ -118,7 +118,7 @@ SQL;
             'topup_presets'=>'50000,100000,200000,500000,1000000','downloader_max_mb'=>'45','downloader_temp_hours'=>'24',
             'downloader_ytdlp_path'=>'','downloader_aria2_path'=>'','downloader_ffmpeg_path'=>'','downloader_mediainfo_path'=>'',
             'downloader_batch_limit'=>'100','media_download_timeout'=>'3600','media_upload_timeout'=>'3600','media_lock_seconds'=>'180',
-            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','schema_version'=>'2.0.0-media-engine'
+            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','schema_version'=>'2.0.1-media-migration'
         ];
         $st=$pdo->prepare('INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)');foreach($settings as $k=>$v)$st->execute([$k,(string)$v]);
         $pdo->prepare('INSERT INTO admins (telegram_id,enabled,created_at) VALUES (?,1,NOW()) ON DUPLICATE KEY UPDATE enabled=1')->execute([$owner]);
@@ -166,6 +166,8 @@ SQL;
         ];
         $texts=[];foreach(App::defaultTexts() as $key=>$row)$texts[]=[$key,$row[0],$row[1]];
         $ts=$pdo->prepare('INSERT INTO texts (`key`,title,`value`) VALUES (?,?,?) ON DUPLICATE KEY UPDATE title=VALUES(title),`value`=VALUES(`value`)');foreach($texts as $t)$ts->execute($t);
+        // Repair a pre-existing 1.x Media schema before workers receive jobs.
+        App::db();
         $webhookUrl=$base.'/webhook.php';
         tgCall($token,'setWebhook',['url'=>$webhookUrl,'secret_token'=>$secret,'drop_pending_updates'=>'true','allowed_updates'=>json_encode(['message','callback_query','chat_join_request','channel_post','edited_channel_post'])]);
         $webhookInfo=tgCall($token,'getWebhookInfo');
