@@ -7,6 +7,12 @@ BASE_URL="https://raw.githubusercontent.com/PEDIHS/freebot/main"
 log(){ printf '\n[freebot-bootstrap] %s\n' "$*"; }
 fail(){ printf '\n[freebot-bootstrap] ERROR: %s\n' "$*" >&2; exit 1; }
 
+retry_curl(){
+  curl -fL --silent --show-error \
+    --connect-timeout 10 --max-time 300 \
+    --retry 8 --retry-delay 2 --retry-all-errors "$@"
+}
+
 [[ "${EUID}" -eq 0 ]] || fail "با root اجرا کن: sudo -i"
 command -v apt-get >/dev/null 2>&1 || fail "نصب خودکار فعلاً برای Ubuntu/Debian است."
 
@@ -22,13 +28,15 @@ HOTFIX_DIR="$(mktemp -d)"
 trap 'rm -f "$TMP"; rm -rf "$HOTFIX_DIR"' EXIT
 
 log "اجرای Installer اصلی FreeBot"
-curl -fsSL "$BASE_URL/install.sh" -o "$TMP"
+retry_curl "$BASE_URL/install.sh" -o "$TMP"
 bash -n "$TMP"
+# مقاوم‌سازی تمام دریافت‌های release داخل installer در برابر 404/خطاهای موقت GitHub
+sed -i 's#curl -fsSL #curl -fL --silent --show-error --connect-timeout 10 --max-time 300 --retry 8 --retry-delay 2 --retry-all-errors #g' "$TMP"
 bash "$TMP"
 
 log "اعمال آخرین Hotfix موتور Multi-Worker"
-curl -fsSL "$BASE_URL/release/media-hotfix.tar.gz.sha256" -o "$HOTFIX_DIR/media-hotfix.tar.gz.sha256"
-curl -fsSL "$BASE_URL/release/media-hotfix.tar.gz.b64.part-00" -o "$HOTFIX_DIR/media-hotfix.tar.gz.b64"
+retry_curl "$BASE_URL/release/media-hotfix.tar.gz.sha256" -o "$HOTFIX_DIR/media-hotfix.tar.gz.sha256"
+retry_curl "$BASE_URL/release/media-hotfix.tar.gz.b64.part-00" -o "$HOTFIX_DIR/media-hotfix.tar.gz.b64"
 base64 -d "$HOTFIX_DIR/media-hotfix.tar.gz.b64" > "$HOTFIX_DIR/media-hotfix.tar.gz"
 HOTFIX_EXPECTED="$(awk '{print $1}' "$HOTFIX_DIR/media-hotfix.tar.gz.sha256")"
 HOTFIX_ACTUAL="$(sha256sum "$HOTFIX_DIR/media-hotfix.tar.gz" | awk '{print $1}')"
@@ -36,11 +44,17 @@ HOTFIX_ACTUAL="$(sha256sum "$HOTFIX_DIR/media-hotfix.tar.gz" | awk '{print $1}')
 tar -tzf "$HOTFIX_DIR/media-hotfix.tar.gz" >/dev/null || fail "بسته Hotfix خراب است."
 tar -xzf "$HOTFIX_DIR/media-hotfix.tar.gz" -C "$APP_DIR"
 chmod +x "$APP_DIR/scripts/"*.sh 2>/dev/null || true
+
+# updater نصب‌شده نیز همان retry policy را استفاده کند.
+if [[ -f "$APP_DIR/scripts/update.sh" ]]; then
+  sed -i 's#curl -fsSL #curl -fL --silent --show-error --connect-timeout 10 --max-time 300 --retry 8 --retry-delay 2 --retry-all-errors #g' "$APP_DIR/scripts/update.sh"
+  chmod 0755 "$APP_DIR/scripts/update.sh"
+fi
 ln -sfn "$APP_DIR/scripts/update.sh" /usr/local/sbin/freebot-update
 systemctl restart freebot-media.service >/dev/null 2>&1 || true
 
 log "نصب health-check"
-curl -fsSL "$BASE_URL/healthcheck.sh" -o /usr/local/sbin/freebot-health
+retry_curl "$BASE_URL/healthcheck.sh" -o /usr/local/sbin/freebot-health
 chmod 0755 /usr/local/sbin/freebot-health
 
 printf '\nنصب زیرساخت و Hotfix کامل شد.\n'
