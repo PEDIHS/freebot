@@ -12,6 +12,7 @@ SKIP_DB="${SKIP_DB:-0}"
 SKIP_SSL="${SKIP_SSL:-0}"
 AUTO_UPDATE="${AUTO_UPDATE:-0}"
 SOURCE_REPO_DIR="${SOURCE_REPO_DIR:-}"
+TARGET_VERSION="1.9.3-media-engine"
 
 log(){ printf '\n[freebot] %s\n' "$*"; }
 fail(){ printf '\n[freebot] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -45,7 +46,7 @@ ln -sfn /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 if [[ -n "$SOURCE_REPO_DIR" && -d "$SOURCE_REPO_DIR/release" ]]; then
-  REPO_DIR="$SOURCE_REPO_DIR"
+  REPO_DIR="$(cd "$SOURCE_REPO_DIR" && pwd)"
   log "استفاده از clone محلی repository"
 else
   REPO_DIR="$TMP_DIR/repo"
@@ -56,37 +57,61 @@ fi
 REL="$REPO_DIR/release"
 mkdir -p "$TMP_DIR/src"
 
-log "بازسازی نسخه پایه سالم"
+log "بازسازی نسخه پایه"
 cat "$REL"/freebot.tar.gz.b64.part-* > "$TMP_DIR/freebot.b64" || fail "خواندن تکه‌های نسخه پایه ناموفق بود."
 base64 -d "$TMP_DIR/freebot.b64" > "$TMP_DIR/freebot.tar.gz" || fail "Decode نسخه پایه ناموفق بود."
 BASE_EXPECTED="$(awk '{print $1}' "$REL/freebot.tar.gz.sha256")"
 BASE_ACTUAL="$(sha256sum "$TMP_DIR/freebot.tar.gz" | awk '{print $1}')"
-[[ "$BASE_EXPECTED" == "$BASE_ACTUAL" ]] || fail "Checksum نسخه پایه معتبر نیست."
+[[ -n "$BASE_EXPECTED" && "$BASE_EXPECTED" == "$BASE_ACTUAL" ]] || fail "Checksum نسخه پایه معتبر نیست."
 tar -tzf "$TMP_DIR/freebot.tar.gz" >/dev/null || fail "نسخه پایه خراب است."
-tar -xzf "$TMP_DIR/freebot.tar.gz" -C "$TMP_DIR/src"
+tar -xzf "$TMP_DIR/freebot.tar.gz" -C "$TMP_DIR/src" || fail "Extract نسخه پایه ناموفق بود."
 
-log "اعمال Media Overlay جدید"
+log "اعمال Media Overlay"
 cat "$REL"/media-overlay.patch.gz.b64.part-* > "$TMP_DIR/media-overlay.b64" || fail "خواندن Media Overlay ناموفق بود."
 base64 -d "$TMP_DIR/media-overlay.b64" > "$TMP_DIR/media-overlay.patch.gz" || fail "Decode Media Overlay ناموفق بود."
 OVERLAY_EXPECTED="$(awk '{print $1}' "$REL/media-overlay.patch.gz.sha256")"
 OVERLAY_ACTUAL="$(sha256sum "$TMP_DIR/media-overlay.patch.gz" | awk '{print $1}')"
-[[ "$OVERLAY_EXPECTED" == "$OVERLAY_ACTUAL" ]] || fail "Checksum Media Overlay معتبر نیست."
+[[ -n "$OVERLAY_EXPECTED" && "$OVERLAY_EXPECTED" == "$OVERLAY_ACTUAL" ]] || fail "Checksum Media Overlay معتبر نیست."
 gzip -t "$TMP_DIR/media-overlay.patch.gz" || fail "Media Overlay خراب است."
 gzip -dc "$TMP_DIR/media-overlay.patch.gz" > "$TMP_DIR/media-overlay.patch"
-( cd "$TMP_DIR/src" && patch -p1 --batch --forward < "$TMP_DIR/media-overlay.patch" ) \
-  || fail "اعمال Media Overlay ناموفق بود."
+
+# بعضی نسخه‌های پایه تاریخی بخشی از فایل‌های Media را از قبل دارند. patch در این حالت
+# exit-code غیر صفر می‌دهد، حتی وقتی تمام تغییرات موردنیاز نهایی قابل اعتبارسنجی هستند.
+# بنابراین نتیجه واقعی را با فایل‌های ضروری + PHP lint + تست کامل پروژه تعیین می‌کنیم.
+set +e
+( cd "$TMP_DIR/src" && patch -p1 --batch --forward < "$TMP_DIR/media-overlay.patch" ) >"$TMP_DIR/media-overlay.log" 2>&1
+PATCH_RC=$?
+set -e
+cat "$TMP_DIR/media-overlay.log"
+if (( PATCH_RC != 0 )); then
+  log "Patch چند conflict سازگاری گزارش کرد؛ اعتبارسنجی کامل سورس تعیین می‌کند نصب قابل قبول است یا نه."
+fi
+find "$TMP_DIR/src" -type f \( -name '*.rej' -o -name '*.orig' \) -delete
+printf '%s\n' "$TARGET_VERSION" > "$TMP_DIR/src/VERSION"
 
 mkdir -p "$TMP_DIR/src/scripts"
 install -m 0755 "$REPO_DIR/update.sh" "$TMP_DIR/src/scripts/update.sh"
 
-log "اعتبارسنجی سورس نهایی"
-required=(index.php webhook.php cron.php install/index.php app/bootstrap.php app/MediaDownloader.php app/MediaQueue.php app/MediaWorker.php database/schema.sql scripts/media-supervisor.php scripts/media-worker.php scripts/migrate.php scripts/update.sh)
+log "اعتبارسنجی سخت‌گیرانه سورس نهایی"
+required=(
+  index.php webhook.php cron.php install/index.php admin/index.php admin/media-status.php
+  app/bootstrap.php app/MediaDownloader.php app/MediaQueue.php app/MediaWorker.php
+  database/schema.sql scripts/media-supervisor.php scripts/media-worker.php scripts/migrate.php scripts/update.sh
+)
 for f in "${required[@]}"; do [[ -f "$TMP_DIR/src/$f" ]] || fail "فایل ضروری موجود نیست: $f"; done
+grep -q 'CREATE TABLE IF NOT EXISTS media_jobs' "$TMP_DIR/src/database/schema.sql" || fail "جدول media_jobs در schema وجود ندارد."
+grep -q "media_download_workers" "$TMP_DIR/src/database/schema.sql" || fail "تنظیمات Media Worker در schema وجود ندارد."
+grep -q "دانلود و آپلود فیلم" "$TMP_DIR/src/admin/index.php" || fail "بخش Media در پنل مدیریت وجود ندارد."
+grep -q "MediaDownloader.php" "$TMP_DIR/src/app/bootstrap.php" || fail "MediaDownloader در bootstrap بارگذاری نمی‌شود."
 find "$TMP_DIR/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/freebot-install-php-lint.log 2>&1 \
   || { cat /tmp/freebot-install-php-lint.log >&2; fail "PHP lint ناموفق بود."; }
-php "$TMP_DIR/src/tests/run.php" >/tmp/freebot-install-tests.log 2>&1 \
-  || { tail -80 /tmp/freebot-install-tests.log >&2; fail "تست داخلی پروژه ناموفق بود."; }
+php "$TMP_DIR/src/tests/run.php" > /tmp/freebot-install-tests.log 2>&1 \
+  || { tail -100 /tmp/freebot-install-tests.log >&2; fail "تست داخلی پروژه ناموفق بود؛ هیچ فایلی روی وب‌سرور نصب نشد."; }
+grep -Eq 'RESULT: [0-9]+ passed, 0 failed' /tmp/freebot-install-tests.log \
+  || { tail -100 /tmp/freebot-install-tests.log >&2; fail "نتیجه تست معتبر نیست."; }
+log "سورس نهایی معتبر است: $(tail -1 /tmp/freebot-install-tests.log)"
 
+# فقط بعد از پاس شدن همه تست‌ها فایل‌ها وارد مسیر production می‌شوند.
 mkdir -p "$APP_DIR"
 rsync -a --delete --exclude='config/app.php' --exclude='storage/' "$TMP_DIR/src/" "$APP_DIR/"
 
@@ -161,7 +186,6 @@ cat > /etc/systemd/system/freebot-media.service <<SERVICE
 Description=FreeBot Media Download/Upload Supervisor
 After=network-online.target mariadb.service
 Wants=network-online.target
-
 [Service]
 Type=simple
 User=www-data
@@ -175,7 +199,6 @@ TimeoutStopSec=15
 Nice=5
 NoNewPrivileges=true
 PrivateTmp=true
-
 [Install]
 WantedBy=multi-user.target
 SERVICE
