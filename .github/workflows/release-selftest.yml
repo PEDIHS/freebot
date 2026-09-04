@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'release/**'
+      - 'overrides/**'
       - 'install.sh'
       - 'update.sh'
       - '.github/workflows/release-selftest.yml'
@@ -45,6 +46,7 @@ jobs:
           cat "$TMP/patch.log"
           find "$TMP/src" -type f \( -name '*.rej' -o -name '*.orig' \) -delete
           printf '1.9.3-media-engine\n' > "$TMP/src/VERSION"
+          install -m 0644 overrides/app/MediaDownloader.php "$TMP/src/app/MediaDownloader.php"
           mkdir -p "$TMP/src/scripts"
           cp update.sh "$TMP/src/scripts/update.sh"
 
@@ -59,6 +61,8 @@ jobs:
           grep -q 'media_download_workers' "$TMP/src/database/schema.sql"
           grep -q 'دانلود و آپلود فیلم' "$TMP/src/admin/index.php"
           grep -q 'MediaDownloader.php' "$TMP/src/app/bootstrap.php"
+          grep -q -- "--downloader" "$TMP/src/app/MediaDownloader.php"
+          grep -q "aria2c" "$TMP/src/app/MediaDownloader.php"
 
           find "$TMP/src" -type f -name '*.php' -print0 | xargs -0 -n1 php -l
           php "$TMP/src/tests/run.php" | tee "$TMP/tests.log"
