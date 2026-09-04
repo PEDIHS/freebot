@@ -31,7 +31,7 @@ apt-get update -y
 apt-get install -y \
   ca-certificates curl git rsync unzip zip nginx mariadb-server \
   php-fpm php-cli php-mysql php-curl php-zip php-mbstring php-xml php-intl \
-  certbot python3-certbot-nginx ffmpeg aria2 python3-venv
+  certbot python3-certbot-nginx ffmpeg aria2 mediainfo jq python3-venv
 
 systemctl enable --now nginx mariadb >/dev/null
 PHP_FPM_SERVICE="$(systemctl list-unit-files --type=service --no-legend 'php*-fpm.service' | awk '{print $1}' | sort -V | tail -1)"
@@ -60,6 +60,21 @@ ACTUAL_SHA="$(sha256sum "$TMP_DIR/freebot.tar.gz" | awk '{print $1}')"
 [[ -n "$EXPECTED_SHA" && "$EXPECTED_SHA" == "$ACTUAL_SHA" ]] || fail "Checksum بسته انتشار معتبر نیست."
 mkdir -p "$TMP_DIR/src"
 tar -xzf "$TMP_DIR/freebot.tar.gz" -C "$TMP_DIR/src"
+
+# Apply the latest overlay release. This keeps the historical base package small
+# while allowing fast feature updates without replacing runtime data.
+PATCH_SHA_URL="https://raw.githubusercontent.com/PEDIHS/freebot/main/release/media-patch.tar.gz.sha256"
+curl -fsSL "$PATCH_SHA_URL" -o "$TMP_DIR/media-patch.tar.gz.sha256"
+: > "$TMP_DIR/media-patch.tar.gz.b64"
+for part in $(seq -w 0 3); do
+  curl -fsSL "https://raw.githubusercontent.com/PEDIHS/freebot/main/release/media-patch.tar.gz.b64.part-${part}" >> "$TMP_DIR/media-patch.tar.gz.b64"
+done
+base64 -d "$TMP_DIR/media-patch.tar.gz.b64" > "$TMP_DIR/media-patch.tar.gz"
+PATCH_EXPECTED="$(awk '{print $1}' "$TMP_DIR/media-patch.tar.gz.sha256")"
+PATCH_ACTUAL="$(sha256sum "$TMP_DIR/media-patch.tar.gz" | awk '{print $1}')"
+[[ -n "$PATCH_EXPECTED" && "$PATCH_EXPECTED" == "$PATCH_ACTUAL" ]] || fail "Checksum بسته overlay معتبر نیست."
+tar -xzf "$TMP_DIR/media-patch.tar.gz" -C "$TMP_DIR/src"
+
 mkdir -p "$APP_DIR"
 rsync -a --delete \
   --exclude='config/app.php' \
@@ -73,6 +88,7 @@ mkdir -p \
   "$APP_DIR/storage/logs" \
   "$APP_DIR/storage/locks" \
   "$APP_DIR/storage/temp" \
+  "$APP_DIR/storage/downloads" \
   "$APP_DIR/storage/source_queue/pending" \
   "$APP_DIR/storage/source_queue/processing" \
   "$APP_DIR/storage/source_queue/failed" \
@@ -156,6 +172,33 @@ CRON
 chmod 644 /etc/cron.d/freebot
 systemctl restart cron || true
 
+log "فعال‌سازی موتور Multi-Worker دانلود/آپلود"
+cat > /etc/systemd/system/freebot-media.service <<SERVICE
+[Unit]
+Description=FreeBot Media Download/Upload Supervisor
+After=network-online.target mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=${APP_DIR}
+ExecStart=/usr/bin/php ${APP_DIR}/scripts/media-supervisor.php
+Restart=always
+RestartSec=2
+KillMode=mixed
+TimeoutStopSec=15
+Nice=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+systemctl daemon-reload
+systemctl enable --now freebot-media.service >/dev/null
+
 ln -sfn "$APP_DIR/scripts/update.sh" /usr/local/sbin/freebot-update
 chmod +x "$APP_DIR/install.sh" "$APP_DIR/scripts/"*.sh /usr/local/sbin/freebot-update
 
@@ -183,6 +226,7 @@ printf 'مسیر پروژه: %s\n' "$APP_DIR"
 printf 'آپدیت دستی: freebot-update\n'
 printf 'نسخه yt-dlp: %s\n' "$(yt-dlp --version 2>/dev/null || true)"
 printf 'نسخه ffmpeg: %s\n' "$(ffmpeg -version 2>/dev/null | head -1 || true)"
+printf 'Media workers: systemctl status freebot-media --no-pager\n'
 if [[ -f /root/.freebot/install-credentials.txt ]]; then
   printf '\nمشخصات دیتابیس برای Installer:\n'
   cat /root/.freebot/install-credentials.txt
