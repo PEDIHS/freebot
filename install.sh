@@ -150,7 +150,7 @@ server {
     client_max_body_size 256M;
     location / { try_files \$uri \$uri/ /index.php?\$query_string; }
     location ~ \.php$ {
-        try_files \$uri =404;
+        # Ubuntu's snippets/fastcgi-php.conf already contains its own try_files.
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:${PHP_SOCKET};
         fastcgi_read_timeout 300;
