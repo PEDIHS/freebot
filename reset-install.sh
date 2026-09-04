@@ -15,5 +15,5 @@ if [[ -d "$INSTALL_DIR" ]]; then BACKUP_DIR="$BACKUP_ROOT/previous-$(date -u +%Y
 rm -f /etc/systemd/system/freebot-download@.service /etc/systemd/system/freebot-upload@.service /etc/cron.d/freebot
 rm -f /etc/nginx/sites-enabled/freebot /etc/nginx/sites-available/freebot
 systemctl daemon-reload
-nginx -t && systemctl reload nginx || true
+if nginx -t; then systemctl reload nginx; fi
 echo "Reset complete. The database was not deleted."
