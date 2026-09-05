@@ -149,7 +149,7 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.0.2-core-migration') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.1.0-channel-history') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -422,6 +422,20 @@ final class App
             refreshed_at datetime NULL,
             CONSTRAINT fk_channel_stats_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $historyColumns=[
+            'history_last_message_id'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_message_count'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_video_count'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_photo_count'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_file_count'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_total_bytes'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'history_scan_status'=>"varchar(30) NOT NULL DEFAULT 'never'",
+            'history_scan_error'=>"text NULL",
+            'history_scanned_at'=>"datetime NULL",
+        ];
+        foreach($historyColumns as $column=>$definition){
+            if(!$pdo->query("SHOW COLUMNS FROM channel_stats LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE channel_stats ADD COLUMN `{$column}` {$definition}");
+        }
         $pdo->exec("CREATE TABLE IF NOT EXISTS invite_link_events (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             product_id int unsigned NULL,
@@ -433,7 +447,7 @@ final class App
             CONSTRAINT fk_invite_event_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
             CONSTRAINT fk_invite_event_order FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        foreach (['downloader_max_mb'=>'45','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100'] as $key=>$value) {
+        foreach (['downloader_max_mb'=>'45','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100','channel_history_scan_timeout'=>'7200'] as $key=>$value) {
             $st=$pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=IF(TRIM(`value`)='',VALUES(`value`),`value`)");
             $st->execute([$key,$value]);
         }

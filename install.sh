@@ -37,7 +37,7 @@ if ! apt-cache show php8.3-fpm >/dev/null 2>&1; then add-apt-repository -y ppa:o
 apt-get install -y php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-gd php8.3-intl php8.3-opcache
 
 if [[ ! -x /opt/freebot-tools/bin/yt-dlp ]]; then python3 -m venv /opt/freebot-tools; fi
-/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade yt-dlp
+/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade yt-dlp 'Telethon>=1.36,<2'
 ln -sfn /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 
 if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then echo "$INSTALL_DIR exists but is not a FreeBot git checkout. Run reset-install.sh first." >&2; exit 1; fi
@@ -47,6 +47,9 @@ chown -R www-data:www-data "$INSTALL_DIR"
 find "$INSTALL_DIR" -type d -exec chmod 0750 {} +
 find "$INSTALL_DIR" -type f -exec chmod 0640 {} +
 chmod 0750 "$INSTALL_DIR/install.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/reset-install.sh" "$INSTALL_DIR/healthcheck.sh"
+chmod 0750 "$INSTALL_DIR/setup-channel-scanner.sh"
+install -d -o root -g www-data -m 0750 /etc/freebot
+install -d -o www-data -g www-data -m 0700 /var/lib/freebot-mtproto
 
 cat > /etc/nginx/sites-available/freebot <<EOF
 server {
@@ -60,7 +63,7 @@ server {
     location ~ \.php$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/run/php/php8.3-fpm.sock;
-        fastcgi_read_timeout 3600;
+        fastcgi_read_timeout 21600;
     }
     location ~ /\. { deny all; }
     location = /config.php { deny all; }
@@ -130,3 +133,4 @@ if [[ $ENABLE_SSL -eq 1 ]]; then certbot --nginx -d "$DOMAIN" --non-interactive 
 
 echo "FreeBot files installed. Open: https://${DOMAIN}/install.php"
 echo "After completing the web installer, run: sudo ${INSTALL_DIR}/healthcheck.sh"
+echo "Optional historical channel scan: sudo ${INSTALL_DIR}/setup-channel-scanner.sh"
