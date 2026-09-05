@@ -456,16 +456,72 @@ final class MediaQueue
         return ['ok'=>$ok,'failed'=>$failed];
     }
 
+    public static function historyScannerStatus(): array
+    {
+        $python='/opt/freebot-tools/bin/python';
+        $script=__DIR__.'/scripts/channel_history_scan.py';
+        $config='/etc/freebot/channel-scanner.env';
+        $session='/var/lib/freebot-mtproto/freebot.session';
+        $ready=is_executable($python)&&is_file($script)&&is_readable($config)&&is_readable($session)&&self::functionEnabled('proc_open');
+        return ['ready'=>$ready,'python'=>$python,'script'=>$script,'config'=>$config,'session'=>$session];
+    }
+
+    public static function scanChannelHistory(int $productId): array
+    {
+        $product=App::one('SELECT id,title,channel_id FROM products WHERE id=?',[$productId]);
+        if(!$product)throw new RuntimeException('محصول یا کانال پیدا نشد.');
+        $scanner=self::historyScannerStatus();
+        if(!$scanner['ready'])throw new RuntimeException('اسکنر تاریخچه هنوز راه‌اندازی نشده است؛ ابتدا setup-channel-scanner.sh را روی سرور اجرا کنید.');
+        // One Telethon session is shared by all products, so serialize scans to
+        // avoid concurrent writes to the access-restricted session database.
+        $lockName='freebot-channel-history';
+        $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
+        if(!$locked)throw new RuntimeException('اسکن تاریخچه یک کانال دیگر هم‌اکنون در حال اجراست.');
+        try{
+            App::q("INSERT INTO channel_stats(product_id,channel_id,history_scan_status,history_scan_error) VALUES (?,?,'running',NULL) ON DUPLICATE KEY UPDATE channel_id=VALUES(channel_id),history_scan_status='running',history_scan_error=NULL",[$productId,$product['channel_id']]);
+            $command=[$scanner['python'],$scanner['script'],'--channel',(string)$product['channel_id'],'--config',$scanner['config'],'--session','/var/lib/freebot-mtproto/freebot'];
+            $pipes=[];$process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
+            if(!is_resource($process))throw new RuntimeException('اجرای پردازش اسکن تاریخچه ممکن نشد.');
+            fclose($pipes[0]);stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+            $stdout='';$stderr='';$started=microtime(true);$timeout=max(300,min(21600,(int)App::setting('channel_history_scan_timeout','7200')));$exitCode=null;
+            while(true){
+                $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+                $processStatus=proc_get_status($process);
+                if(!$processStatus['running']){$exitCode=(int)$processStatus['exitcode'];break;}
+                if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(500000);proc_terminate($process,9);$exitCode=124;break;}
+                usleep(100000);
+            }
+            $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+            fclose($pipes[1]);fclose($pipes[2]);$closedCode=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closedCode;
+            $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
+            if($exitCode!==0||!is_array($payload)||!($payload['ok']??false)){
+                $detail=is_array($payload)?(string)($payload['error']??''):'';
+                if($detail==='')$detail=trim($stderr)?:'اسکنر پاسخ معتبر نداد.';
+                throw new RuntimeException(self::cleanError($detail));
+            }
+            $values=[];foreach(['last_message_id','message_count','video_count','photo_count','file_count','total_bytes'] as $key)$values[$key]=max(0,(int)($payload[$key]??0));
+            App::q("UPDATE channel_stats SET channel_title=COALESCE(NULLIF(?,''),channel_title),history_last_message_id=?,history_message_count=?,history_video_count=?,history_photo_count=?,history_file_count=?,history_total_bytes=?,history_scan_status='completed',history_scan_error=NULL,history_scanned_at=NOW() WHERE product_id=?",[(string)($payload['channel_title']??''),$values['last_message_id'],$values['message_count'],$values['video_count'],$values['photo_count'],$values['file_count'],$values['total_bytes'],$productId]);
+            App::logEvent('channel_history_scan_completed','تاریخچه کانال با موفقیت اسکن شد.',['product_id'=>$productId,'channel_id'=>$product['channel_id']]+$values);
+            return $values+['product_id'=>$productId,'channel_title'=>(string)($payload['channel_title']??'')];
+        }catch(Throwable $e){
+            App::q("INSERT INTO channel_stats(product_id,channel_id,history_scan_status,history_scan_error) VALUES (?,?,'failed',?) ON DUPLICATE KEY UPDATE history_scan_status='failed',history_scan_error=VALUES(history_scan_error)",[$productId,$product['channel_id'],self::cleanError($e->getMessage())]);
+            App::logEvent('channel_history_scan_failed',$e->getMessage(),['product_id'=>$productId,'channel_id'=>$product['channel_id']]);
+            throw $e;
+        }finally{
+            try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
+        }
+    }
+
     public static function channelRows(): array
     {
-        return App::all("SELECT p.id,p.title product_title,p.channel_id,p.enabled,s.channel_title,s.channel_username,s.member_count,s.admin_count,s.bot_status,s.can_post,s.last_error,s.refreshed_at,
+        return App::all("SELECT p.id,p.title product_title,p.channel_id,p.enabled,s.channel_title,s.channel_username,s.member_count,s.admin_count,s.bot_status,s.can_post,s.last_error,s.refreshed_at,s.history_last_message_id,s.history_message_count,s.history_video_count,s.history_photo_count,s.history_file_count,s.history_total_bytes,s.history_scan_status,s.history_scan_error,s.history_scanned_at,
             (SELECT COUNT(*) FROM orders o WHERE o.product_id=p.id AND o.status='paid') sales_count,
             (SELECT COALESCE(SUM(o.amount),0) FROM orders o WHERE o.product_id=p.id AND o.status='paid') sales_amount,
             (SELECT COUNT(*) FROM invite_link_events i WHERE i.product_id=p.id) invite_count,
-            (SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.media_type='video') video_count,
-            (SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.media_type='photo') photo_count,
-            (SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.media_type IN ('document','animation','audio')) file_count,
-            (SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id) tracked_posts,
+            COALESCE(s.history_video_count,0)+(SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.message_id>COALESCE(s.history_last_message_id,0) AND cp.media_type='video') video_count,
+            COALESCE(s.history_photo_count,0)+(SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.message_id>COALESCE(s.history_last_message_id,0) AND cp.media_type='photo') photo_count,
+            COALESCE(s.history_file_count,0)+(SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.message_id>COALESCE(s.history_last_message_id,0) AND cp.media_type IN ('document','animation','audio')) file_count,
+            COALESCE(s.history_message_count,0)+(SELECT COUNT(*) FROM channel_posts cp WHERE cp.chat_id=p.channel_id AND cp.message_id>COALESCE(s.history_last_message_id,0)) tracked_posts,
             (SELECT COUNT(*) FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE b.product_id=p.id AND j.status='completed') downloader_done
             FROM products p LEFT JOIN channel_stats s ON s.product_id=p.id ORDER BY p.id DESC");
     }

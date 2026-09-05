@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-bash -n "$ROOT/install.sh" "$ROOT/update.sh" "$ROOT/reset-install.sh" "$ROOT/healthcheck.sh"
-shellcheck -x "$ROOT/install.sh" "$ROOT/update.sh" "$ROOT/reset-install.sh" "$ROOT/healthcheck.sh"
+bash -n "$ROOT/install.sh" "$ROOT/update.sh" "$ROOT/reset-install.sh" "$ROOT/healthcheck.sh" "$ROOT/setup-channel-scanner.sh"
+shellcheck -x "$ROOT/install.sh" "$ROOT/update.sh" "$ROOT/reset-install.sh" "$ROOT/healthcheck.sh" "$ROOT/setup-channel-scanner.sh"
 test ! -e "$ROOT/config.php"
 test -e "$ROOT/config.example.php"
 test -e "$ROOT/worker.php"
@@ -12,4 +12,7 @@ grep -q 'php8.3-fpm' "$ROOT/install.sh"
 grep -q 'freebot-download@' "$ROOT/install.sh"
 grep -q 'freebot-upload@' "$ROOT/install.sh"
 grep -q 'certbot --nginx' "$ROOT/install.sh"
+grep -q 'Telethon' "$ROOT/install.sh"
+grep -q 'channel_history_scan.py' "$ROOT/setup-channel-scanner.sh"
+python3 "$ROOT/scripts/channel_history_scan.py" --self-test
 echo "Installer test passed."

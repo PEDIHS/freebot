@@ -39,6 +39,8 @@ $requiredJobColumns=['source_host','detected_title','engine','download_attempts'
 foreach($requiredJobColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_jobs.{$column}");
 $requiredWorkerColumns=['role','hostname','pid','status','current_job_id','jobs_processed','last_error','started_at','heartbeat_at','updated_at'];
 foreach($requiredWorkerColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_workers LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_workers.{$column}");
+$requiredHistoryColumns=['history_last_message_id','history_message_count','history_video_count','history_photo_count','history_file_count','history_total_bytes','history_scan_status','history_scan_error','history_scanned_at'];
+foreach($requiredHistoryColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM channel_stats LIKE ".$pdo->quote($column))->fetch(),"missing migrated channel_stats.{$column}");
 $statuses=$pdo->query("SELECT position,status,error_code FROM media_jobs ORDER BY position")->fetchAll(PDO::FETCH_ASSOC);
 migrationExpect($statuses[0]['status']==='completed','legacy done job must become completed');
 migrationExpect($statuses[1]['status']==='failed'&&$statuses[1]['error_code']==='LEGACY_ROW','incomplete legacy job must be quarantined');
