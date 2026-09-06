@@ -149,7 +149,7 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.1.0-channel-history') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.2.0-web-scanner') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }

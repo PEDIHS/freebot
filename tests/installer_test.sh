@@ -14,5 +14,8 @@ grep -q 'freebot-upload@' "$ROOT/install.sh"
 grep -q 'certbot --nginx' "$ROOT/install.sh"
 grep -q 'Telethon' "$ROOT/install.sh"
 grep -q 'channel_history_scan.py' "$ROOT/setup-channel-scanner.sh"
+grep -q 'channel_scanner_send_code' "$ROOT/admin.php"
+grep -q -- '--web-action' "$ROOT/scripts/channel_history_scan.py"
+! grep -q "setSetting('channel_scanner_.*password" "$ROOT/media.php"
 python3 "$ROOT/scripts/channel_history_scan.py" --self-test
 echo "Installer test passed."
