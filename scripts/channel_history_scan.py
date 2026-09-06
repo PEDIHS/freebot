@@ -71,7 +71,38 @@ def self_test() -> None:
     assert classify_message(photo) == ("photo", 50)
     document = SimpleNamespace(video=None, photo=None, document=SimpleNamespace(size=75), gif=None, audio=None, voice=None)
     assert classify_message(document) == ("document", 75)
+    assert validate_credentials({"api_id": "12345", "api_hash": "a" * 32, "phone": "+49123456789"}) == (12345, "a" * 32, "+49123456789")
     print("Channel history scanner self-test passed.")
+
+
+def validate_credentials(data: dict[str, object]) -> tuple[int, str, str]:
+    api_id = str(data.get("api_id", "")).strip()
+    api_hash = str(data.get("api_hash", "")).strip()
+    phone = str(data.get("phone", "")).strip()
+    if not api_id.isdigit() or int(api_id) <= 0:
+        raise RuntimeError("API ID is invalid.")
+    if len(api_hash) < 20 or len(api_hash) > 64 or any(char not in "0123456789abcdefABCDEF" for char in api_hash):
+        raise RuntimeError("API Hash is invalid.")
+    if not phone.startswith("+") or not phone[1:].isdigit() or not 7 <= len(phone[1:]) <= 18:
+        raise RuntimeError("Phone number is invalid; include the country code.")
+    return int(api_id), api_hash, phone
+
+
+def friendly_error(error: Exception) -> str:
+    name = type(error).__name__
+    messages = {
+        "PhoneNumberInvalidError": "شماره تلفن نامعتبر است؛ شماره را همراه کد کشور وارد کنید.",
+        "PhoneCodeInvalidError": "کد ورود تلگرام نادرست است.",
+        "PhoneCodeExpiredError": "کد ورود منقضی شده است؛ دوباره کد درخواست کنید.",
+        "PhoneCodeHashEmptyError": "درخواست کد معتبر نیست؛ راه‌اندازی را از ابتدا انجام دهید.",
+        "PasswordHashInvalidError": "رمز دومرحله‌ای تلگرام نادرست است.",
+        "ApiIdInvalidError": "API ID یا API Hash معتبر نیست.",
+        "AuthKeyError": "نشست تلگرام معتبر نیست؛ اتصال را دوباره انجام دهید.",
+    }
+    if name == "FloodWaitError":
+        seconds = int(getattr(error, "seconds", 0) or 0)
+        return f"تلگرام محدودیت موقت اعمال کرده است؛ {seconds} ثانیه دیگر تلاش کنید."
+    return messages.get(name, str(error) or name)
 
 
 async def resolve_entity(client: object, raw_target: str) -> object:
@@ -91,16 +122,82 @@ async def resolve_entity(client: object, raw_target: str) -> object:
         raise RuntimeError(f"Channel is not accessible to the scanner account: {first_error}") from first_error
 
 
-async def run(args: argparse.Namespace) -> dict[str, object]:
+async def run_web_action(args: argparse.Namespace, input_data: dict[str, object]) -> dict[str, object]:
+    try:
+        from telethon import TelegramClient
+        from telethon.errors import SessionPasswordNeededError
+    except ImportError as error:
+        raise RuntimeError("Telethon is not installed. Run update.sh.") from error
+
+    config = load_config(args.config)
+    credentials = {
+        "api_id": input_data.get("api_id") or config.get("TELEGRAM_API_ID", ""),
+        "api_hash": input_data.get("api_hash") or config.get("TELEGRAM_API_HASH", ""),
+        "phone": input_data.get("phone") or config.get("TELEGRAM_PHONE", ""),
+    }
+    api_id, api_hash, phone = validate_credentials(credentials)
+    client = TelegramClient(args.session, api_id, api_hash)
+    await client.connect()
+    try:
+        if args.web_action == "send-code":
+            sent = await client.send_code_request(phone)
+            return {
+                "ok": True,
+                "step": "code",
+                "phone_code_hash": str(sent.phone_code_hash),
+                "timeout": int(getattr(sent, "timeout", 0) or 0),
+            }
+        if args.web_action == "verify-code":
+            code = str(input_data.get("code", "")).replace(" ", "").strip()
+            phone_code_hash = str(input_data.get("phone_code_hash", "")).strip()
+            if not code.isdigit() or not 4 <= len(code) <= 8:
+                raise RuntimeError("کد ورود تلگرام نامعتبر است.")
+            if not phone_code_hash:
+                raise RuntimeError("درخواست کد منقضی شده است؛ دوباره کد بگیرید.")
+            try:
+                user = await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+            except SessionPasswordNeededError:
+                return {"ok": True, "step": "password", "needs_password": True}
+            return user_result(user)
+        if args.web_action == "verify-password":
+            password = str(input_data.get("password", ""))
+            if not password:
+                raise RuntimeError("رمز دومرحله‌ای را وارد کنید.")
+            user = await client.sign_in(password=password)
+            return user_result(user)
+        if args.web_action == "status":
+            if not await client.is_user_authorized():
+                raise RuntimeError("نشست تلگرام مجاز نیست؛ اتصال را دوباره انجام دهید.")
+            return user_result(await client.get_me())
+        raise RuntimeError("Web setup action is invalid.")
+    except Exception as error:
+        raise RuntimeError(friendly_error(error)) from error
+    finally:
+        await client.disconnect()
+
+
+def user_result(user: object) -> dict[str, object]:
+    first_name = str(getattr(user, "first_name", "") or "")
+    last_name = str(getattr(user, "last_name", "") or "")
+    return {
+        "ok": True,
+        "step": "complete",
+        "authorized_user_id": int(getattr(user, "id", 0) or 0),
+        "name": (first_name + " " + last_name).strip(),
+        "username": str(getattr(user, "username", "") or ""),
+    }
+
+
+async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[str, object]:
     try:
         from telethon import TelegramClient
     except ImportError as error:
         raise RuntimeError("Telethon is not installed. Run setup-channel-scanner.sh.") from error
 
     config = load_config(args.config)
-    api_id = config.get("TELEGRAM_API_ID", os.getenv("TELEGRAM_API_ID", ""))
-    api_hash = config.get("TELEGRAM_API_HASH", os.getenv("TELEGRAM_API_HASH", ""))
-    phone = config.get("TELEGRAM_PHONE", os.getenv("TELEGRAM_PHONE", ""))
+    api_id = str(input_data.get("api_id") or os.getenv("TELEGRAM_API_ID", "") or config.get("TELEGRAM_API_ID", ""))
+    api_hash = str(input_data.get("api_hash") or os.getenv("TELEGRAM_API_HASH", "") or config.get("TELEGRAM_API_HASH", ""))
+    phone = str(input_data.get("phone") or os.getenv("TELEGRAM_PHONE", "") or config.get("TELEGRAM_PHONE", ""))
     session = args.session or config.get("TELEGRAM_SESSION", "/var/lib/freebot-mtproto/freebot")
     if not api_id.isdigit() or not api_hash:
         raise RuntimeError("TELEGRAM_API_ID/API_HASH are not configured.")
@@ -161,15 +258,24 @@ def main() -> int:
     parser.add_argument("--config", default="/etc/freebot/channel-scanner.env")
     parser.add_argument("--session", default="")
     parser.add_argument("--login-only", action="store_true")
+    parser.add_argument("--json-input", action="store_true")
+    parser.add_argument("--web-action", choices=("send-code", "verify-code", "verify-password", "status"), default="")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
-    if not args.login_only and not args.channel:
+    if not args.login_only and not args.web_action and not args.channel:
         parser.error("--channel is required")
     try:
-        print(json.dumps(asyncio.run(run(args)), ensure_ascii=False, separators=(",", ":")))
+        input_data: dict[str, object] = {}
+        if args.json_input:
+            decoded = json.load(sys.stdin)
+            if not isinstance(decoded, dict):
+                raise RuntimeError("JSON input must be an object.")
+            input_data = decoded
+        operation = run_web_action(args, input_data) if args.web_action else run(args, input_data)
+        print(json.dumps(asyncio.run(operation), ensure_ascii=False, separators=(",", ":")))
         return 0
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False, separators=(",", ":")))

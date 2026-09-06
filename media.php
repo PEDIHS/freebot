@@ -456,14 +456,121 @@ final class MediaQueue
         return ['ok'=>$ok,'failed'=>$failed];
     }
 
+    private static function webScannerCredentials(): ?array
+    {
+        $apiId=(string)App::setting('channel_scanner_api_id','');$apiHash=(string)App::setting('channel_scanner_api_hash','');$phone=(string)App::setting('channel_scanner_phone','');
+        if($apiId===''||$apiHash===''||$phone==='')return null;
+        try{return ['api_id'=>App::decrypt($apiId),'api_hash'=>App::decrypt($apiHash),'phone'=>App::decrypt($phone)];}catch(Throwable){return null;}
+    }
+
+    private static function scannerRuntime(): array
+    {
+        return ['python'=>'/opt/freebot-tools/bin/python','script'=>__DIR__.'/scripts/channel_history_scan.py','config'=>'/etc/freebot/channel-scanner.env','session_base'=>'/var/lib/freebot-mtproto/freebot','session'=>'/var/lib/freebot-mtproto/freebot.session'];
+    }
+
+    private static function runHistoryScanner(array $arguments,array $input=[],int $timeout=120): array
+    {
+        $runtime=self::scannerRuntime();
+        if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new RuntimeException('موتور Telethon نصب نیست؛ ابتدا update.sh را اجرا کنید.');
+        if(!self::functionEnabled('proc_open'))throw new RuntimeException('تابع proc_open در PHP غیرفعال است.');
+        $command=array_merge([$runtime['python'],$runtime['script']],$arguments,['--config',$runtime['config']]);
+        if($input!==[])$command[]='--json-input';
+        $pipes=[];$process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
+        if(!is_resource($process))throw new RuntimeException('اجرای موتور Telethon ممکن نشد.');
+        if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);
+        stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+        $stdout='';$stderr='';$started=microtime(true);$exitCode=null;$timeout=max(10,min(21600,$timeout));
+        while(true){
+            $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+            if(strlen($stdout)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');}
+            $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
+            if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
+        }
+        $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;
+        $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
+        if($exitCode!==0||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
+        return $payload;
+    }
+
+    private static function cleanupSetupSession(string $base): void
+    {
+        if(!preg_match('#^/var/lib/freebot-mtproto/setup-[a-f0-9]{32}$#',$base))return;
+        foreach(glob($base.'.session*')?:[] as $file)if(is_file($file))@unlink($file);
+    }
+
+    private static function pendingScannerSetup(): array
+    {
+        $setup=$_SESSION['channel_scanner_setup']??null;if(!is_array($setup)||time()-(int)($setup['created_at']??0)>1200){if(is_array($setup))self::cleanupSetupSession((string)($setup['session_base']??''));unset($_SESSION['channel_scanner_setup']);throw new RuntimeException('زمان راه‌اندازی منقضی شده است؛ دوباره کد ورود بگیرید.');}
+        try{return $setup+['api_id_plain'=>App::decrypt((string)$setup['api_id']),'api_hash_plain'=>App::decrypt((string)$setup['api_hash']),'phone_plain'=>App::decrypt((string)$setup['phone']),'phone_code_hash_plain'=>App::decrypt((string)($setup['phone_code_hash']??''))];}catch(Throwable){throw new RuntimeException('اطلاعات موقت راه‌اندازی معتبر نیست؛ دوباره شروع کنید.');}
+    }
+
+    public static function historyScannerSetupState(): array
+    {
+        $setup=$_SESSION['channel_scanner_setup']??null;if(!is_array($setup)||time()-(int)($setup['created_at']??0)>1200)return ['step'=>'start'];
+        $phone='';try{$phone=App::decrypt((string)$setup['phone']);}catch(Throwable){}
+        $masked=$phone!==''?substr($phone,0,min(4,strlen($phone))).str_repeat('•',max(3,strlen($phone)-6)).substr($phone,-2):'';
+        return ['step'=>in_array($setup['step']??'',['code','password'],true)?$setup['step']:'start','phone'=>$masked];
+    }
+
+    public static function startHistoryScannerSetup(string $apiId,string $apiHash,string $phone): array
+    {
+        $apiId=trim($apiId);$apiHash=trim($apiHash);$phone=preg_replace('/[\s()-]+/','',trim($phone))??'';
+        if(!preg_match('/^[1-9][0-9]{3,14}$/',$apiId))throw new RuntimeException('API ID معتبر نیست.');
+        if(!preg_match('/^[a-fA-F0-9]{20,64}$/',$apiHash))throw new RuntimeException('API Hash معتبر نیست.');
+        if(!preg_match('/^\+[0-9]{7,18}$/',$phone))throw new RuntimeException('شماره را همراه کد کشور وارد کنید؛ مانند +49123...');
+        $dir='/var/lib/freebot-mtproto';if(!is_dir($dir)||!is_writable($dir))throw new RuntimeException('مسیر امن نشست قابل نوشتن نیست؛ ابتدا update.sh را روی سرور اجرا کنید.');
+        if(is_array($_SESSION['channel_scanner_setup']??null))self::cleanupSetupSession((string)$_SESSION['channel_scanner_setup']['session_base']);
+        foreach(glob($dir.'/setup-*.session*')?:[] as $file)if(is_file($file)&&filemtime($file)<time()-3600)@unlink($file);
+        $base=$dir.'/setup-'.bin2hex(random_bytes(16));$credentials=['api_id'=>$apiId,'api_hash'=>$apiHash,'phone'=>$phone];
+        $result=self::runHistoryScanner(['--web-action','send-code','--session',$base],$credentials,120);
+        $_SESSION['channel_scanner_setup']=['step'=>'code','created_at'=>time(),'session_base'=>$base,'api_id'=>App::encrypt($apiId),'api_hash'=>App::encrypt($apiHash),'phone'=>App::encrypt($phone),'phone_code_hash'=>App::encrypt((string)$result['phone_code_hash'])];
+        return $result;
+    }
+
+    public static function verifyHistoryScannerCode(string $code): array
+    {
+        $setup=self::pendingScannerSetup();$input=['api_id'=>$setup['api_id_plain'],'api_hash'=>$setup['api_hash_plain'],'phone'=>$setup['phone_plain'],'phone_code_hash'=>$setup['phone_code_hash_plain'],'code'=>trim($code)];
+        $result=self::runHistoryScanner(['--web-action','verify-code','--session',$setup['session_base']],$input,120);
+        if(($result['step']??'')==='password'){$_SESSION['channel_scanner_setup']['step']='password';return $result;}
+        self::finalizeHistoryScannerSetup($setup,$result);return $result;
+    }
+
+    public static function verifyHistoryScannerPassword(string $password): array
+    {
+        $setup=self::pendingScannerSetup();$input=['api_id'=>$setup['api_id_plain'],'api_hash'=>$setup['api_hash_plain'],'phone'=>$setup['phone_plain'],'password'=>$password];
+        $result=self::runHistoryScanner(['--web-action','verify-password','--session',$setup['session_base']],$input,120);self::finalizeHistoryScannerSetup($setup,$result);return $result;
+    }
+
+    private static function finalizeHistoryScannerSetup(array $setup,array $user): void
+    {
+        $source=$setup['session_base'].'.session';$runtime=self::scannerRuntime();if(!is_file($source))throw new RuntimeException('فایل نشست تأییدشده ساخته نشد.');
+        $lock='freebot-channel-history';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('یک اسکن در حال اجراست؛ پس از پایان دوباره تأیید کنید.');
+        try{if(!@rename($source,$runtime['session']))throw new RuntimeException('ثبت امن نشست تلگرام ناموفق بود.');@chmod($runtime['session'],0600);
+            App::setSetting('channel_scanner_api_id',App::encrypt($setup['api_id_plain']));App::setSetting('channel_scanner_api_hash',App::encrypt($setup['api_hash_plain']));App::setSetting('channel_scanner_phone',App::encrypt($setup['phone_plain']));App::setSetting('channel_scanner_account_id',(string)($user['authorized_user_id']??''));App::setSetting('channel_scanner_account_name',(string)($user['name']??''));App::setSetting('channel_scanner_account_username',(string)($user['username']??''));App::setSetting('channel_scanner_configured_at',date('Y-m-d H:i:s'));
+        }finally{try{App::q('SELECT RELEASE_LOCK(?)',[$lock]);}catch(Throwable){}}
+        self::cleanupSetupSession($setup['session_base']);unset($_SESSION['channel_scanner_setup']);App::logEvent('channel_scanner_connected','حساب اسکنر تاریخچه از پنل وب متصل شد.',['account_id'=>$user['authorized_user_id']??null]);
+    }
+
+    public static function cancelHistoryScannerSetup(): void
+    {
+        $setup=$_SESSION['channel_scanner_setup']??null;if(is_array($setup))self::cleanupSetupSession((string)($setup['session_base']??''));unset($_SESSION['channel_scanner_setup']);
+    }
+
+    public static function testHistoryScanner(): array
+    {
+        $status=self::historyScannerStatus();if(!$status['ready'])throw new RuntimeException('اسکنر تاریخچه آماده نیست.');$input=self::webScannerCredentials()??[];return self::runHistoryScanner(['--web-action','status','--session',$status['session_base']],$input,120);
+    }
+
+    public static function disconnectHistoryScanner(): void
+    {
+        $lock='freebot-channel-history';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('یک اسکن در حال اجراست؛ پس از پایان دوباره تلاش کنید.');
+        try{$runtime=self::scannerRuntime();foreach(glob($runtime['session_base'].'.session*')?:[] as $file)if(is_file($file))@unlink($file);foreach(['channel_scanner_api_id','channel_scanner_api_hash','channel_scanner_phone','channel_scanner_account_id','channel_scanner_account_name','channel_scanner_account_username','channel_scanner_configured_at'] as $key)App::setSetting($key,'');self::cancelHistoryScannerSetup();App::logEvent('channel_scanner_disconnected','نشست اسکنر تاریخچه از پنل حذف شد.');}finally{try{App::q('SELECT RELEASE_LOCK(?)',[$lock]);}catch(Throwable){}}
+    }
+
     public static function historyScannerStatus(): array
     {
-        $python='/opt/freebot-tools/bin/python';
-        $script=__DIR__.'/scripts/channel_history_scan.py';
-        $config='/etc/freebot/channel-scanner.env';
-        $session='/var/lib/freebot-mtproto/freebot.session';
-        $ready=is_executable($python)&&is_file($script)&&is_readable($config)&&is_readable($session)&&self::functionEnabled('proc_open');
-        return ['ready'=>$ready,'python'=>$python,'script'=>$script,'config'=>$config,'session'=>$session];
+        $runtime=self::scannerRuntime();$web=self::webScannerCredentials();$cli=is_readable($runtime['config']);$engine=is_executable($runtime['python'])&&is_file($runtime['script'])&&self::functionEnabled('proc_open');$ready=$engine&&is_readable($runtime['session'])&&($web!==null||$cli);
+        return $runtime+['ready'=>$ready,'engine'=>$engine,'credentials'=>$web!==null||$cli,'source'=>$web!==null?'web':($cli?'server':'none'),'account_id'=>(string)App::setting('channel_scanner_account_id',''),'account_name'=>(string)App::setting('channel_scanner_account_name',''),'account_username'=>(string)App::setting('channel_scanner_account_username',''),'configured_at'=>(string)App::setting('channel_scanner_configured_at','')];
     }
 
     public static function scanChannelHistory(int $productId): array
@@ -479,26 +586,7 @@ final class MediaQueue
         if(!$locked)throw new RuntimeException('اسکن تاریخچه یک کانال دیگر هم‌اکنون در حال اجراست.');
         try{
             App::q("INSERT INTO channel_stats(product_id,channel_id,history_scan_status,history_scan_error) VALUES (?,?,'running',NULL) ON DUPLICATE KEY UPDATE channel_id=VALUES(channel_id),history_scan_status='running',history_scan_error=NULL",[$productId,$product['channel_id']]);
-            $command=[$scanner['python'],$scanner['script'],'--channel',(string)$product['channel_id'],'--config',$scanner['config'],'--session','/var/lib/freebot-mtproto/freebot'];
-            $pipes=[];$process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
-            if(!is_resource($process))throw new RuntimeException('اجرای پردازش اسکن تاریخچه ممکن نشد.');
-            fclose($pipes[0]);stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
-            $stdout='';$stderr='';$started=microtime(true);$timeout=max(300,min(21600,(int)App::setting('channel_history_scan_timeout','7200')));$exitCode=null;
-            while(true){
-                $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
-                $processStatus=proc_get_status($process);
-                if(!$processStatus['running']){$exitCode=(int)$processStatus['exitcode'];break;}
-                if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(500000);proc_terminate($process,9);$exitCode=124;break;}
-                usleep(100000);
-            }
-            $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
-            fclose($pipes[1]);fclose($pipes[2]);$closedCode=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closedCode;
-            $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
-            if($exitCode!==0||!is_array($payload)||!($payload['ok']??false)){
-                $detail=is_array($payload)?(string)($payload['error']??''):'';
-                if($detail==='')$detail=trim($stderr)?:'اسکنر پاسخ معتبر نداد.';
-                throw new RuntimeException(self::cleanError($detail));
-            }
+            $input=self::webScannerCredentials()??[];$payload=self::runHistoryScanner(['--channel',(string)$product['channel_id'],'--session',$scanner['session_base']],$input,max(300,min(21600,(int)App::setting('channel_history_scan_timeout','7200'))));
             $values=[];foreach(['last_message_id','message_count','video_count','photo_count','file_count','total_bytes'] as $key)$values[$key]=max(0,(int)($payload[$key]??0));
             App::q("UPDATE channel_stats SET channel_title=COALESCE(NULLIF(?,''),channel_title),history_last_message_id=?,history_message_count=?,history_video_count=?,history_photo_count=?,history_file_count=?,history_total_bytes=?,history_scan_status='completed',history_scan_error=NULL,history_scanned_at=NOW() WHERE product_id=?",[(string)($payload['channel_title']??''),$values['last_message_id'],$values['message_count'],$values['video_count'],$values['photo_count'],$values['file_count'],$values['total_bytes'],$productId]);
             App::logEvent('channel_history_scan_completed','تاریخچه کانال با موفقیت اسکن شد.',['product_id'=>$productId,'channel_id'=>$product['channel_id']]+$values);

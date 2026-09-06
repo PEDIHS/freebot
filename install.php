@@ -118,7 +118,7 @@ SQL;
             'topup_presets'=>'50000,100000,200000,500000,1000000','downloader_max_mb'=>'45','downloader_temp_hours'=>'24',
             'downloader_ytdlp_path'=>'','downloader_aria2_path'=>'','downloader_ffmpeg_path'=>'','downloader_mediainfo_path'=>'',
             'downloader_batch_limit'=>'100','media_download_timeout'=>'3600','media_upload_timeout'=>'3600','media_lock_seconds'=>'180',
-            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','channel_history_scan_timeout'=>'7200','schema_version'=>'2.1.0-channel-history'
+            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','channel_history_scan_timeout'=>'7200','schema_version'=>'2.2.0-web-scanner'
         ];
         $st=$pdo->prepare('INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)');foreach($settings as $k=>$v)$st->execute([$k,(string)$v]);
         $pdo->prepare('INSERT INTO admins (telegram_id,enabled,created_at) VALUES (?,1,NOW()) ON DUPLICATE KEY UPDATE enabled=1')->execute([$owner]);
