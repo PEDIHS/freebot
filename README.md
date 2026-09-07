@@ -1,6 +1,6 @@
 # FreeBot — فروشگاه فیلم تلگرام
 
-نسخه `2.3.4-telethon-exec-runner` بر پایه مستقیم پروژه PHP فروش فیلم `1.3.1-product-grid` ساخته شده است. این ریپو هیچ وابستگی یا فایلی از پروژه‌های VPN، Proxy، Overlay یا Hotfixهای قدیمی ندارد.
+نسخه `2.3.5-telethon-verified-capture` بر پایه مستقیم پروژه PHP فروش فیلم `1.3.1-product-grid` ساخته شده است. این ریپو هیچ وابستگی یا فایلی از پروژه‌های VPN، Proxy، Overlay یا Hotfixهای قدیمی ندارد.
 
 ## امکانات اصلی
 

@@ -389,12 +389,13 @@ def main() -> int:
     parser.add_argument("--result-file", default="")
     parser.add_argument("--json-input", action="store_true")
     parser.add_argument("--web-action", choices=("send-code", "verify-code", "verify-password", "status"), default="")
+    parser.add_argument("--transport-probe", default="")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
-    if not args.login_only and not args.web_action and not args.channel:
+    if not args.login_only and not args.web_action and not args.channel and not args.transport_probe:
         parser.error("--channel is required")
     if args.download_message and not args.output:
         parser.error("--output is required with --download-message")
@@ -402,6 +403,11 @@ def main() -> int:
         parser.error("choose only one transfer operation")
     try:
         configure_result_file(args.result_file)
+        if args.transport_probe:
+            if not re.fullmatch(r"[a-f0-9]{32}", args.transport_probe):
+                raise RuntimeError("Transport probe token is invalid.")
+            emit_json({"ok": True, "probe": args.transport_probe, "pid": os.getpid()})
+            return 0
         input_data: dict[str, object] = {}
         if args.json_input:
             decoded = json.load(sys.stdin)

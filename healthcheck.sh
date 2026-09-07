@@ -23,6 +23,8 @@ if [[ -f "$INSTALL_DIR/config.php" ]]; then
   else
     echo "INFO  Historical channel scanner is optional and not configured."
   fi
+  # shellcheck disable=SC2016
+  if runuser -u www-data -- php -r 'require $argv[1];require $argv[2];$r=MediaQueue::historyScannerTransportProbe();exit(($r["ok"]??false)?0:1);' "$INSTALL_DIR/app.php" "$INSTALL_DIR/media.php"; then pass "Telethon PHP/Python transport"; else fail "Telethon PHP/Python transport"; fi
 else
   echo "INFO  Web installer is not completed; database and worker runtime checks skipped."
 fi
