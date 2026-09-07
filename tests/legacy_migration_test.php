@@ -35,7 +35,9 @@ $mediaMigration->invoke(null,$pdo);
 migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM webhook_updates LIKE 'created_at'")->fetch(),'webhook_updates.created_at must be repaired');
 foreach(['username','first_name','last_name','balance','blocked','state','state_data','inline_menu_ready','created_at','last_seen_at'] as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM users LIKE ".$pdo->quote($column))->fetch(),"missing migrated users.{$column}");
 
-$requiredJobColumns=['source_host','detected_title','engine','download_attempts','upload_attempts','download_speed_bps','upload_speed_bps','eta_seconds','file_path','file_name','mime_type','telegram_message_id','error_code','error_message','locked_by','lock_token','lock_expires_at','heartbeat_at','started_at','finished_at'];
+$requiredBatchColumns=['source_type','source_channel_id','source_channel_title','source_last_message_id','source_scanned_items','sequential_mode'];
+foreach($requiredBatchColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_batches LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_batches.{$column}");
+$requiredJobColumns=['source_host','detected_title','engine','download_attempts','upload_attempts','download_speed_bps','upload_speed_bps','eta_seconds','file_path','file_name','mime_type','source_chat_id','source_message_id','source_date','telegram_message_id','error_code','error_message','locked_by','lock_token','lock_expires_at','heartbeat_at','started_at','finished_at'];
 foreach($requiredJobColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_jobs.{$column}");
 $requiredWorkerColumns=['role','hostname','pid','status','current_job_id','jobs_processed','last_error','started_at','heartbeat_at','updated_at'];
 foreach($requiredWorkerColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_workers LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_workers.{$column}");

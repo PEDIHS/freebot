@@ -46,6 +46,34 @@ final class MediaQueue
         return $batchId;
     }
 
+    public static function createTelegramChannelBatch(int $productId,string $sourceChannel,string $title='',int $maxAttempts=3,bool $skipExisting=true,string $createdBy='panel'): array
+    {
+        $sourceChannel=trim($sourceChannel);
+        if(!preg_match('/^-?[1-9][0-9]{4,20}$/',$sourceChannel))throw new RuntimeException('آیدی کانال مبدأ باید عددی باشد؛ مانند ‎-1001234567890.');
+        $product=App::one('SELECT id,title,channel_id FROM products WHERE id=?',[$productId]);
+        if(!$product)throw new RuntimeException('محصول یا کانال مقصد پیدا نشد.');
+        self::assertCanPost((string)$product['channel_id']);
+        if(!self::historyScannerStatus()['ready'])throw new RuntimeException('ابتدا حساب تلگرام را از بخش «تنظیم اسکنر کانال» متصل کنید.');
+        $maxAttempts=max(1,min(5,$maxAttempts));$createdBy=mb_substr($createdBy,0,64);
+        $title=trim($title)!==''?trim($title):'انتقال کانال '.$sourceChannel;
+        App::q("INSERT INTO media_batches(product_id,channel_id,title,caption_template,upload_mode,source_type,source_channel_id,sequential_mode,status,total_items,created_by,created_at,updated_at) VALUES (?,?,?,'','auto','telegram_channel',?,1,'paused',0,?,NOW(),NOW())",[$productId,$product['channel_id'],mb_substr($title,0,255),$sourceChannel,$createdBy]);
+        $batchId=(int)App::db()->lastInsertId();$position=0;$skipped=0;
+        try{
+            $summary=self::streamTelegramVideoList($sourceChannel,static function(array $item)use($productId,$batchId,$maxAttempts,$skipExisting,&$position,&$skipped):void{
+                $chatId=trim((string)($item['source_chat_id']??''));$messageId=max(0,(int)($item['message_id']??0));
+                if($chatId===''||$messageId<=0)return;
+                if($skipExisting&&App::one("SELECT 1 FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE b.product_id=? AND j.source_chat_id=? AND j.source_message_id=? LIMIT 1",[$productId,$chatId,$messageId])){$skipped++;return;}
+                $position++;$source='tgmtproto://channel/'.$chatId.'/'.$messageId;$fileName=self::sanitizeFileName((string)($item['file_name']??('telegram-'.$messageId.'.mp4')));if(pathinfo($fileName,PATHINFO_EXTENSION)==='')$fileName.='.mp4';
+                App::q("INSERT INTO media_jobs(batch_id,position,source_url,source_host,detected_title,engine,status,max_attempts,total_bytes,file_name,mime_type,source_chat_id,source_message_id,source_date,created_at,updated_at) VALUES (?,?,?,?,?,'telegram-mtproto','queued',?,?,?,?,?,?,?,NOW(),NOW())",[$batchId,$position,$source,'telegram-mtproto',mb_substr((string)($item['title']??pathinfo($fileName,PATHINFO_FILENAME)),0,500),$maxAttempts,max(0,(int)($item['file_size']??0)),$fileName,mb_substr((string)($item['mime_type']??'video/mp4'),0,120),$chatId,$messageId,trim((string)($item['date']??''))?:null]);
+            });
+            $channelTitle=mb_substr((string)($summary['channel_title']??''),0,255);$scanned=max(0,(int)($summary['video_count']??0));$lastId=max(0,(int)($summary['last_message_id']??0));
+            App::q("UPDATE media_batches SET source_channel_id=?,source_channel_title=?,source_last_message_id=?,source_scanned_items=?,total_items=?,status=?,completed_at=?,updated_at=NOW() WHERE id=?",[(string)($summary['channel_id']??$sourceChannel),$channelTitle?:null,$lastId,$scanned,$position,$position>0?'queued':'completed',$position>0?null:date('Y-m-d H:i:s'),$batchId]);
+            if($position>0)self::eventForBatch($batchId,'success','channel_import','اسکن کانال کامل شد و ویدیوها به صف ترتیبی افزوده شدند.');
+            App::logEvent('telegram_channel_imported','کانال مبدأ اسکن و صف انتقال ساخته شد.',['batch_id'=>$batchId,'product_id'=>$productId,'source_channel_id'=>$summary['channel_id']??$sourceChannel,'videos'=>$scanned,'queued'=>$position,'skipped'=>$skipped]);
+            return ['batch_id'=>$batchId,'scanned'=>$scanned,'queued'=>$position,'skipped'=>$skipped,'channel_title'=>$channelTitle];
+        }catch(Throwable $e){App::q('DELETE FROM media_batches WHERE id=?',[$batchId]);App::logEvent('telegram_channel_import_failed',$e->getMessage(),['product_id'=>$productId,'source_channel_id'=>$sourceChannel]);throw $e;}
+    }
+
     public static function extractLinks(string $raw): array
     {
         preg_match_all('~https?://[^\s<>"\']+~iu',$raw,$matches);
@@ -130,13 +158,13 @@ final class MediaQueue
         self::registerWorker($workerId,$role);
         $status=$role==='download'?'queued':'downloaded';$lease=self::lockSeconds();
         for($attempt=0;$attempt<10;$attempt++){
-            $candidate=App::one("SELECT j.id FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.status=? AND b.status IN ('queued','running') AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=NOW()) AND (j.lock_expires_at IS NULL OR j.lock_expires_at<NOW()) ORDER BY b.id,j.position,j.id LIMIT 1",[$status]);
+            $candidate=App::one("SELECT j.id FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.status=? AND b.status IN ('queued','running') AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=NOW()) AND (j.lock_expires_at IS NULL OR j.lock_expires_at<NOW()) AND (COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<j.position AND previous_job.status NOT IN ('completed','failed','cancelled'))) ORDER BY b.id,j.position,j.id LIMIT 1",[$status]);
             if(!$candidate)return null;$token=bin2hex(random_bytes(32));$target=$role==='download'?'downloading':'uploading';$attemptColumn=$role==='download'?'download_attempts':'upload_attempts';
             $claimed=App::q("UPDATE media_jobs SET status=?,progress=IF(?='download',GREATEST(progress,1),GREATEST(progress,72)),attempts=attempts+1,{$attemptColumn}={$attemptColumn}+1,locked_by=?,lock_token=?,lock_expires_at=DATE_ADD(NOW(),INTERVAL {$lease} SECOND),heartbeat_at=NOW(),started_at=COALESCE(started_at,NOW()),next_attempt_at=NULL,error_code=NULL,error_message=NULL,updated_at=NOW() WHERE id=? AND status=? AND (lock_expires_at IS NULL OR lock_expires_at<NOW())",[$target,$role,$workerId,$token,$candidate['id'],$status])->rowCount();
             if($claimed!==1)continue;
             App::q("UPDATE media_batches b JOIN media_jobs j ON j.batch_id=b.id SET b.status='running',b.current_item_id=j.id,b.started_at=COALESCE(b.started_at,NOW()),b.updated_at=NOW() WHERE j.id=?",[$candidate['id']]);
             self::heartbeatWorker($workerId,'busy',(int)$candidate['id']);
-            return App::one("SELECT j.*,b.product_id,b.channel_id,b.upload_mode,b.total_items,b.status batch_status,b.title batch_title,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id WHERE j.id=?",[$candidate['id']]);
+            return App::one("SELECT j.*,b.product_id,b.channel_id,b.upload_mode,b.total_items,b.sequential_mode,b.status batch_status,b.title batch_title,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id WHERE j.id=?",[$candidate['id']]);
         }
         return null;
     }
@@ -146,9 +174,10 @@ final class MediaQueue
         $jobId=(int)$job['id'];self::event($jobId,'info','resolve','شناسایی لینک و موتور دانلود آغاز شد.',['url_host'=>$job['source_host'],'worker'=>$job['locked_by']]);
         self::assertLease($job);
         $resolved=self::resolveSource((string)$job['source_url']);
-        App::q('UPDATE media_jobs SET engine=?,detected_title=?,mime_type=?,updated_at=NOW() WHERE id=? AND lock_token=?',[$resolved['engine'],$resolved['title']?:null,$resolved['mime']?:null,$jobId,$job['lock_token']]);
-        self::event($jobId,'info','resolve','موتور دانلود انتخاب شد.',['engine'=>$resolved['engine'],'title'=>$resolved['title']]);
-        $file=$resolved['engine']==='yt-dlp'?self::downloadWithYtDlp($job,$resolved):(self::aria2Path()!==null?self::downloadWithAria2($job,$resolved):self::downloadDirect($job,$resolved));
+        $resolvedTitle=$resolved['engine']==='telegram-mtproto'&&trim((string)($job['detected_title']??''))!==''?(string)$job['detected_title']:(string)($resolved['title']??'');
+        App::q('UPDATE media_jobs SET engine=?,detected_title=?,mime_type=?,updated_at=NOW() WHERE id=? AND lock_token=?',[$resolved['engine'],$resolvedTitle?:null,$resolved['mime']?:null,$jobId,$job['lock_token']]);
+        self::event($jobId,'info','resolve','موتور دانلود انتخاب شد.',['engine'=>$resolved['engine'],'title'=>$resolvedTitle]);
+        $file=$resolved['engine']==='telegram-mtproto'?self::downloadWithTelethon($job,$resolved):($resolved['engine']==='yt-dlp'?self::downloadWithYtDlp($job,$resolved):(self::aria2Path()!==null?self::downloadWithAria2($job,$resolved):self::downloadDirect($job,$resolved)));
         $probe=self::probeMedia($file['path']);if($probe!==[])self::event($jobId,'info','mediainfo','مشخصات فایل با MediaInfo بررسی شد.',$probe);
         self::assertLease($job);
         App::q("UPDATE media_jobs SET status='downloaded',file_path=?,file_name=?,mime_type=?,downloaded_bytes=?,total_bytes=?,progress=70,eta_seconds=NULL,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL,heartbeat_at=NOW(),error_code=NULL,error_message=NULL,updated_at=NOW() WHERE id=? AND lock_token=?",[$file['path'],$file['name'],$file['mime'],$file['size'],$file['size'],$jobId,$job['lock_token']]);
@@ -253,6 +282,7 @@ final class MediaQueue
 
     private static function resolveSource(string $url): array
     {
+        if(preg_match('#^tgmtproto://channel/(-?[0-9]+)/([1-9][0-9]*)$#D',$url,$match))return ['engine'=>'telegram-mtproto','url'=>$url,'chat_id'=>$match[1],'message_id'=>(int)$match[2],'title'=>'telegram-'.$match[2].'.mp4','mime'=>'video/mp4'];
         self::validateUrl($url);
         $path=(string)(parse_url($url,PHP_URL_PATH)??'');$ext=strtolower(pathinfo($path,PATHINFO_EXTENSION));
         if(in_array($ext,self::VIDEO_EXTENSIONS,true)&&$ext!=='m3u8')return ['engine'=>'direct','url'=>$url,'title'=>self::titleFromUrl($url),'mime'=>self::mimeFromExtension($ext)];
@@ -275,6 +305,67 @@ final class MediaQueue
         catch(Throwable $e){if(self::ytDlpPath()===null)throw new MediaQueueException('RESOLVE_FAILED','تشخیص لینک ناموفق بود: '.$e->getMessage());}
         if(self::ytDlpPath()!==null)return ['engine'=>'yt-dlp','url'=>$url,'title'=>self::titleFromUrl($url),'mime'=>'video/mp4'];
         throw new MediaQueueException('UNSUPPORTED_SOURCE','این لینک مستقیم نیست و موتور yt-dlp روی سرور در دسترس نیست.');
+    }
+
+    private static function downloadWithTelethon(array $job,array $resolved): array
+    {
+        $scanner=self::historyScannerStatus();
+        if(!$scanner['ready'])throw new MediaQueueException('MTPROTO_NOT_READY','حساب تلگرام متصل نیست؛ آن را از بخش تنظیم اسکنر کانال دوباره متصل کنید.');
+        $expected=max(0,(int)($job['total_bytes']??0));
+        if($expected>self::maxBytes())throw new MediaQueueException('SIZE_LIMIT','حجم ویدیو از سقف '.self::humanBytes(self::maxBytes()).' بیشتر است.');
+        $lockName='freebot-mtproto-session';
+        $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
+        if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال استفاده است؛ Job خودکار دوباره تلاش می‌شود.',10);
+        $process=null;$pipes=[];$closed=false;
+        try{
+            $runtime=self::scannerRuntime();
+            if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new MediaQueueException('MTPROTO_NOT_READY','موتور Telethon نصب نیست؛ update.sh را اجرا کنید.');
+            if(!self::functionEnabled('proc_open'))throw new MediaQueueException('PROC_OPEN_DISABLED','تابع proc_open در PHP غیرفعال است.');
+            $jobId=(int)$job['id'];$dir=self::jobDirectory($jobId);
+            foreach(glob($dir.'/*')?:[] as $old)self::deleteSafeFile($old);
+            $name=self::sanitizeFileName((string)($job['file_name']??''));
+            if($name===''||$name==='video')$name='telegram-'.(int)$resolved['message_id'].'.mp4';
+            if(pathinfo($name,PATHINFO_EXTENSION)==='')$name.='.mp4';
+            $target=$dir.'/'.$name;
+            $command=[$runtime['python'],$runtime['script'],'--download-message','--channel',(string)$resolved['chat_id'],'--message-id',(string)$resolved['message_id'],'--output',$target,'--session',$scanner['session_base'],'--config',$runtime['config']];
+            $input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
+            $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
+            if(!is_resource($process))throw new MediaQueueException('MTPROTO_START','اجرای دانلود Telethon ممکن نشد.');
+            if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);unset($pipes[0]);
+            stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+            App::q("UPDATE media_jobs SET status='downloading',progress=5,download_speed_bps=0,eta_seconds=NULL,updated_at=NOW() WHERE id=? AND lock_token=?",[$jobId,$job['lock_token']]);
+            self::event($jobId,'info','download','دانلود مستقیم پیام کانال با نشست امن Telethon آغاز شد.',['source_chat_id'=>$resolved['chat_id'],'source_message_id'=>$resolved['message_id']]);
+            $buffer='';$stderr='';$payload=null;$startedAt=microtime(true);$exitCode=null;$timeout=self::downloadTimeout();
+            while(true){
+                $chunk=stream_get_contents($pipes[1])?:'';$buffer.=$chunk;$stderr.=stream_get_contents($pipes[2])?:'';
+                while(($newline=strpos($buffer,"\n"))!==false){
+                    $line=trim(substr($buffer,0,$newline));$buffer=substr($buffer,$newline+1);if($line==='')continue;$decoded=json_decode($line,true);if(!is_array($decoded))continue;
+                    if(($decoded['type']??'')==='progress'){
+                        $downloaded=max(0,(int)($decoded['downloaded']??0));$total=max($expected,(int)($decoded['total']??0));
+                        if($downloaded>self::maxBytes()){proc_terminate($process,15);throw new MediaQueueException('SIZE_LIMIT','حجم ویدیو از سقف مجاز بیشتر است.');}
+                        if(!self::updateTransferProgress($job,'download',$downloaded,$total,$startedAt,5,65)){proc_terminate($process,15);throw new MediaQueueException('JOB_CANCELLED','Job توسط مدیر لغو شد.');}
+                    }else{$payload=$decoded;}
+                }
+                if(strlen($buffer)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);throw new MediaQueueException('MTPROTO_OUTPUT','خروجی موتور Telethon بیش از حد مجاز بود.');}
+                $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
+                if(microtime(true)-$startedAt>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}
+                usleep(100000);
+            }
+            $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+            foreach(array_filter(array_map('trim',preg_split('/\R/',$buffer)?:[])) as $line){$decoded=json_decode($line,true);if(is_array($decoded))$payload=$decoded;}
+            fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
+            if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){
+                $detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'دانلود Telethon پاسخ معتبر نداد.';
+                $code=str_contains($detail,'پیدا نشد')?'TELEGRAM_SOURCE_MISSING':'MTPROTO_DOWNLOAD';throw new MediaQueueException($code,self::cleanError($detail));
+            }
+            if(!self::isSafeExistingFile($target))throw new MediaQueueException('MTPROTO_NO_FILE','Telethon فایل نهایی را ایجاد نکرد.');
+            $size=(int)(filesize($target)?:0);if($size<=0||$size>self::maxBytes()){self::deleteSafeFile($target);throw new MediaQueueException('SIZE_LIMIT','حجم فایل خروجی خارج از سقف مجاز است.');}
+            return ['path'=>$target,'name'=>basename($target),'mime'=>self::detectMime($target,(string)($payload['mime_type']??'video/mp4')),'size'=>$size];
+        }finally{
+            foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);
+            if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}
+            try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
+        }
     }
 
     private static function downloadDirect(array $job,array $resolved): array
@@ -402,7 +493,7 @@ final class MediaQueue
             App::q("UPDATE media_jobs SET status='cancelled',locked_by=NULL,lock_token=NULL,lock_expires_at=NULL,error_code='BATCH_CANCELLED',error_message='دسته توسط مدیر لغو شد.',finished_at=NOW(),updated_at=NOW() WHERE id=?",[$jobId]);
             self::event($jobId,'warning','cancelled','پردازش به‌دلیل لغو دسته متوقف شد.');return false;
         }
-        $permanent=in_array($code,['INVALID_URL','PRIVATE_URL','UNSUPPORTED_SCHEME','SIZE_LIMIT','ENGINE_MISSING','UNSUPPORTED_SOURCE','PROC_OPEN_DISABLED','TELEGRAM_FORMAT'],true);
+        $permanent=in_array($code,['INVALID_URL','PRIVATE_URL','UNSUPPORTED_SCHEME','SIZE_LIMIT','ENGINE_MISSING','UNSUPPORTED_SOURCE','PROC_OPEN_DISABLED','TELEGRAM_FORMAT','TELEGRAM_SOURCE_MISSING'],true);
         $retry=!$permanent&&$attempts<$max;
         $retryAfter=$e instanceof MediaQueueException&&$e->retryAfter!==null?$e->retryAfter:min(900,15*(2**max(0,$attempts-1)));$retryAfter=max(3,$retryAfter);
         if($stage==='download')self::purgeJobFiles($jobId,(string)($fresh['file_path']??''));
@@ -468,6 +559,36 @@ final class MediaQueue
         return ['python'=>'/opt/freebot-tools/bin/python','script'=>__DIR__.'/scripts/channel_history_scan.py','config'=>'/etc/freebot/channel-scanner.env','session_base'=>'/var/lib/freebot-mtproto/freebot','session'=>'/var/lib/freebot-mtproto/freebot.session'];
     }
 
+    private static function streamTelegramVideoList(string $sourceChannel,callable $onVideo): array
+    {
+        $runtime=self::scannerRuntime();$scanner=self::historyScannerStatus();
+        if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new RuntimeException('موتور Telethon نصب نیست؛ ابتدا update.sh را اجرا کنید.');
+        if(!self::functionEnabled('proc_open'))throw new RuntimeException('تابع proc_open در PHP غیرفعال است.');
+        $lockName='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
+        if(!$locked)throw new RuntimeException('نشست تلگرام در حال استفاده است؛ پس از پایان دانلود یا اسکن دوباره تلاش کنید.');
+        $process=null;$pipes=[];$closed=false;
+        try{
+            $command=[$runtime['python'],$runtime['script'],'--list-videos','--channel',$sourceChannel,'--session',$scanner['session_base'],'--config',$runtime['config']];$input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
+            $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);if(!is_resource($process))throw new RuntimeException('اجرای اسکن کانال ممکن نشد.');
+            if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);unset($pipes[0]);stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+            $buffer='';$stderr='';$summary=null;$started=microtime(true);$exitCode=null;$timeout=max(300,min(21600,(int)App::setting('channel_history_scan_timeout','7200')));
+            $consume=static function(string $line)use($onVideo,&$summary):void{$line=trim($line);if($line==='')return;$decoded=json_decode($line,true);if(!is_array($decoded))return;if(($decoded['type']??'')==='video')$onVideo($decoded);else $summary=$decoded;};
+            while(true){
+                $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+                while(($newline=strpos($buffer,"\n"))!==false){$consume(substr($buffer,0,$newline));$buffer=substr($buffer,$newline+1);}
+                if(strlen($buffer)>2097152||strlen($stderr)>1048576){proc_terminate($process,9);throw new RuntimeException('خروجی اسکن کانال بیش از حد مجاز بود.');}
+                $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
+                if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
+            }
+            $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';foreach(preg_split('/\R/',$buffer)?:[] as $line)$consume($line);
+            fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
+            if(($exitCode!==null&&$exitCode>0)||!is_array($summary)||!($summary['ok']??false)){$detail=is_array($summary)?(string)($summary['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
+            return $summary;
+        }finally{
+            foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
+        }
+    }
+
     private static function runHistoryScanner(array $arguments,array $input=[],int $timeout=120): array
     {
         $runtime=self::scannerRuntime();
@@ -488,7 +609,7 @@ final class MediaQueue
         }
         $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;
         $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
-        if($exitCode!==0||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
+        if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
         return $payload;
     }
 
@@ -544,7 +665,7 @@ final class MediaQueue
     private static function finalizeHistoryScannerSetup(array $setup,array $user): void
     {
         $source=$setup['session_base'].'.session';$runtime=self::scannerRuntime();if(!is_file($source))throw new RuntimeException('فایل نشست تأییدشده ساخته نشد.');
-        $lock='freebot-channel-history';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('یک اسکن در حال اجراست؛ پس از پایان دوباره تأیید کنید.');
+        $lock='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('نشست تلگرام در حال استفاده است؛ چند لحظه بعد دوباره تأیید کنید.');
         try{if(!@rename($source,$runtime['session']))throw new RuntimeException('ثبت امن نشست تلگرام ناموفق بود.');@chmod($runtime['session'],0600);
             App::setSetting('channel_scanner_api_id',App::encrypt($setup['api_id_plain']));App::setSetting('channel_scanner_api_hash',App::encrypt($setup['api_hash_plain']));App::setSetting('channel_scanner_phone',App::encrypt($setup['phone_plain']));App::setSetting('channel_scanner_account_id',(string)($user['authorized_user_id']??''));App::setSetting('channel_scanner_account_name',(string)($user['name']??''));App::setSetting('channel_scanner_account_username',(string)($user['username']??''));App::setSetting('channel_scanner_configured_at',date('Y-m-d H:i:s'));
         }finally{try{App::q('SELECT RELEASE_LOCK(?)',[$lock]);}catch(Throwable){}}
@@ -563,7 +684,7 @@ final class MediaQueue
 
     public static function disconnectHistoryScanner(): void
     {
-        $lock='freebot-channel-history';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('یک اسکن در حال اجراست؛ پس از پایان دوباره تلاش کنید.');
+        $lock='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lock])['acquired']??0)===1;if(!$locked)throw new RuntimeException('نشست تلگرام در حال استفاده است؛ پس از پایان عملیات دوباره تلاش کنید.');
         try{$runtime=self::scannerRuntime();foreach(glob($runtime['session_base'].'.session*')?:[] as $file)if(is_file($file))@unlink($file);foreach(['channel_scanner_api_id','channel_scanner_api_hash','channel_scanner_phone','channel_scanner_account_id','channel_scanner_account_name','channel_scanner_account_username','channel_scanner_configured_at'] as $key)App::setSetting($key,'');self::cancelHistoryScannerSetup();App::logEvent('channel_scanner_disconnected','نشست اسکنر تاریخچه از پنل حذف شد.');}finally{try{App::q('SELECT RELEASE_LOCK(?)',[$lock]);}catch(Throwable){}}
     }
 
@@ -581,7 +702,7 @@ final class MediaQueue
         if(!$scanner['ready'])throw new RuntimeException('اسکنر تاریخچه هنوز راه‌اندازی نشده است؛ ابتدا setup-channel-scanner.sh را روی سرور اجرا کنید.');
         // One Telethon session is shared by all products, so serialize scans to
         // avoid concurrent writes to the access-restricted session database.
-        $lockName='freebot-channel-history';
+        $lockName='freebot-mtproto-session';
         $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
         if(!$locked)throw new RuntimeException('اسکن تاریخچه یک کانال دیگر هم‌اکنون در حال اجراست.');
         try{
