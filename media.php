@@ -316,8 +316,9 @@ final class MediaQueue
         $lockName='freebot-mtproto-session';
         $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
         if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال استفاده است؛ Job خودکار دوباره تلاش می‌شود.',10);
-        $process=null;$pipes=[];$closed=false;
+        $process=null;$pipes=[];$closed=false;$resultFile='';
         try{
+            $resultFile=self::newScannerResultFile();
             $runtime=self::scannerRuntime();
             if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new MediaQueueException('MTPROTO_NOT_READY','موتور Telethon نصب نیست؛ update.sh را اجرا کنید.');
             if(!self::functionEnabled('proc_open'))throw new MediaQueueException('PROC_OPEN_DISABLED','تابع proc_open در PHP غیرفعال است.');
@@ -327,7 +328,7 @@ final class MediaQueue
             if($name===''||$name==='video')$name='telegram-'.(int)$resolved['message_id'].'.mp4';
             if(pathinfo($name,PATHINFO_EXTENSION)==='')$name.='.mp4';
             $target=$dir.'/'.$name;
-            $command=[$runtime['python'],$runtime['script'],'--download-message','--channel',(string)$resolved['chat_id'],'--message-id',(string)$resolved['message_id'],'--output',$target,'--session',$scanner['session_base'],'--config',$runtime['config']];
+            $command=[$runtime['python'],$runtime['script'],'--download-message','--channel',(string)$resolved['chat_id'],'--message-id',(string)$resolved['message_id'],'--output',$target,'--session',$scanner['session_base'],'--config',$runtime['config'],'--result-file',$resultFile];
             $input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
             $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
             if(!is_resource($process))throw new MediaQueueException('MTPROTO_START','اجرای دانلود Telethon ممکن نشد.');
@@ -353,6 +354,7 @@ final class MediaQueue
             }
             $buffer.=self::drainFinishedPipe($pipes[1],2097152-strlen($buffer));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));
             foreach(array_filter(array_map('trim',preg_split('/\R/',$buffer)?:[])) as $line){$decoded=json_decode($line,true);if(is_array($decoded))$payload=$decoded;}
+            if(is_file($resultFile)&&($stored=fopen($resultFile,'rb'))!==false){while(($line=fgets($stored))!==false){$decoded=json_decode(trim($line),true);if(is_array($decoded)&&($decoded['type']??'')!=='progress')$payload=$decoded;}fclose($stored);}
             fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
             if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){
                 $detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'دانلود Telethon پاسخ معتبر نداد.';
@@ -362,6 +364,7 @@ final class MediaQueue
             $size=(int)(filesize($target)?:0);if($size<=0||$size>self::maxBytes()){self::deleteSafeFile($target);throw new MediaQueueException('SIZE_LIMIT','حجم فایل خروجی خارج از سقف مجاز است.');}
             return ['path'=>$target,'name'=>basename($target),'mime'=>self::detectMime($target,(string)($payload['mime_type']??'video/mp4')),'size'=>$size];
         }finally{
+            if($resultFile!=='')@unlink($resultFile);
             foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);
             if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}
             try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
@@ -559,6 +562,13 @@ final class MediaQueue
         return ['python'=>'/opt/freebot-tools/bin/python','script'=>__DIR__.'/scripts/channel_history_scan.py','config'=>'/etc/freebot/channel-scanner.env','session_base'=>'/var/lib/freebot-mtproto/freebot','session'=>'/var/lib/freebot-mtproto/freebot.session'];
     }
 
+    private static function newScannerResultFile(): string
+    {
+        $dir='/var/lib/freebot-mtproto';if(!is_dir($dir)||!is_writable($dir))throw new RuntimeException('مسیر امن نشست Telethon قابل نوشتن نیست؛ update.sh را اجرا کنید.');
+        foreach(glob($dir.'/result-*.ndjson')?:[] as $old)if(is_file($old)&&filemtime($old)<time()-3600)@unlink($old);
+        return $dir.'/result-'.bin2hex(random_bytes(16)).'.ndjson';
+    }
+
     private static function streamTelegramVideoList(string $sourceChannel,callable $onVideo): array
     {
         $runtime=self::scannerRuntime();$scanner=self::historyScannerStatus();
@@ -566,13 +576,14 @@ final class MediaQueue
         if(!self::functionEnabled('proc_open'))throw new RuntimeException('تابع proc_open در PHP غیرفعال است.');
         $lockName='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
         if(!$locked)throw new RuntimeException('نشست تلگرام در حال استفاده است؛ پس از پایان دانلود یا اسکن دوباره تلاش کنید.');
-        $process=null;$pipes=[];$closed=false;
+        $process=null;$pipes=[];$closed=false;$resultFile='';
         try{
-            $command=[$runtime['python'],$runtime['script'],'--list-videos','--channel',$sourceChannel,'--session',$scanner['session_base'],'--config',$runtime['config']];$input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
+            $resultFile=self::newScannerResultFile();
+            $command=[$runtime['python'],$runtime['script'],'--list-videos','--channel',$sourceChannel,'--session',$scanner['session_base'],'--config',$runtime['config'],'--result-file',$resultFile];$input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
             $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);if(!is_resource($process))throw new RuntimeException('اجرای اسکن کانال ممکن نشد.');
             if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);unset($pipes[0]);stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
             $buffer='';$stderr='';$summary=null;$started=microtime(true);$exitCode=null;$timeout=max(300,min(21600,(int)App::setting('channel_history_scan_timeout','7200')));
-            $consume=static function(string $line)use($onVideo,&$summary):void{$line=trim($line);if($line==='')return;$decoded=json_decode($line,true);if(!is_array($decoded))return;if(($decoded['type']??'')==='video')$onVideo($decoded);else $summary=$decoded;};
+            $delivered=[];$consume=static function(string $line)use($onVideo,&$summary,&$delivered):void{$line=trim($line);if($line==='')return;$decoded=json_decode($line,true);if(!is_array($decoded))return;if(($decoded['type']??'')==='video'){$key=(string)($decoded['source_chat_id']??'').':'.(string)($decoded['message_id']??'');if(isset($delivered[$key]))return;$delivered[$key]=true;$onVideo($decoded);}else $summary=$decoded;};
             while(true){
                 $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
                 while(($newline=strpos($buffer,"\n"))!==false){$consume(substr($buffer,0,$newline));$buffer=substr($buffer,$newline+1);}
@@ -581,10 +592,12 @@ final class MediaQueue
                 if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
             }
             $buffer.=self::drainFinishedPipe($pipes[1],2097152-strlen($buffer));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));foreach(preg_split('/\R/',$buffer)?:[] as $line)$consume($line);
+            if(is_file($resultFile)&&($stored=fopen($resultFile,'rb'))!==false){while(($line=fgets($stored))!==false)$consume($line);fclose($stored);}
             fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
             if(($exitCode!==null&&$exitCode>0)||!is_array($summary)||!($summary['ok']??false)){$detail=is_array($summary)?(string)($summary['error']??''):'';if($detail==='')$detail=trim($stderr);if($detail==='')$detail='موتور Telethon بدون پاسخ JSON پایان یافت (کد خروج '.($exitCode??'نامشخص').').';throw new RuntimeException(self::cleanError($detail));}
             return $summary;
         }finally{
+            if($resultFile!=='')@unlink($resultFile);
             foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
         }
     }
@@ -594,7 +607,7 @@ final class MediaQueue
         $runtime=self::scannerRuntime();
         if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new RuntimeException('موتور Telethon نصب نیست؛ ابتدا update.sh را اجرا کنید.');
         if(!self::functionEnabled('proc_open'))throw new RuntimeException('تابع proc_open در PHP غیرفعال است.');
-        $command=array_merge([$runtime['python'],$runtime['script']],$arguments,['--config',$runtime['config']]);
+        $resultFile=self::newScannerResultFile();$command=array_merge([$runtime['python'],$runtime['script']],$arguments,['--config',$runtime['config'],'--result-file',$resultFile]);
         if($input!==[])$command[]='--json-input';
         $pipes=[];$process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
         if(!is_resource($process))throw new RuntimeException('اجرای موتور Telethon ممکن نشد.');
@@ -603,11 +616,11 @@ final class MediaQueue
         $stdout='';$stderr='';$started=microtime(true);$exitCode=null;$timeout=max(10,min(21600,$timeout));
         while(true){
             $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
-            if(strlen($stdout)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');}
+            if(strlen($stdout)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);@unlink($resultFile);throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');}
             $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
             if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
         }
-        $stdout.=self::drainFinishedPipe($pipes[1],1048576-strlen($stdout));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;
+        $stdout.=self::drainFinishedPipe($pipes[1],1048576-strlen($stdout));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;$stored=is_file($resultFile)?file_get_contents($resultFile,false,null,0,1048577):false;@unlink($resultFile);if(is_string($stored)&&trim($stored)!=='')$stdout=$stored;
         $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
         if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr);if($detail==='')$detail='موتور Telethon بدون پاسخ JSON پایان یافت (کد خروج '.($exitCode??'نامشخص').').';throw new RuntimeException(self::cleanError($detail));}
         return $payload;
