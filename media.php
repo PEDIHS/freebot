@@ -626,7 +626,7 @@ final class MediaQueue
             $stdout=implode("\n",$captured);$stored=is_file($resultFile)?file_get_contents($resultFile,false,null,0,1048577):false;$stderr=file_get_contents($stderrFile,false,null,0,1048577);
             if(strlen($stdout)>1048576||(int)(@filesize($resultFile)?:0)>1048576||(int)(@filesize($stderrFile)?:0)>1048576)throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');
             $combined=(is_string($stored)&&trim($stored)!=='')?$stored:$stdout;$lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$combined)?:[])));$payload=null;
-            for($index=count($lines)-1;$index>=0;$index--){$decoded=json_decode($lines[$index],true);if(is_array($decoded)){$payload=$decoded;break;}}
+            for($index=count($lines)-1;$index>=0;$index--){$decoded=json_decode($lines[$index],true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(is_array($decoded)){$payload=$decoded;break;}}
             if($exitCode>0||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim(is_string($stderr)?$stderr:'');if($detail===''&&$stdout!=='')$detail=self::lastLines($stdout,8);if($detail==='')$detail='Telethon هیچ خروجی ثبت نکرد (کد '.$exitCode.'). اجراگر: exec-capture، خطوط: '.count($captured).'، فایل نتیجه: '.(int)(@filesize($resultFile)?:0).' بایت، نسخه: '.substr(@hash_file('sha256',$runtime['script'])?:'unknown',0,12);throw new RuntimeException(self::cleanError($detail));}
             return $payload;
         }finally{
@@ -637,7 +637,7 @@ final class MediaQueue
     public static function historyScannerTransportProbe(): array
     {
         $token=bin2hex(random_bytes(16));$payload=self::runHistoryScanner(['--transport-probe',$token],[],30);
-        if(!hash_equals($token,(string)($payload['probe']??'')))throw new RuntimeException('پاسخ تست انتقال Telethon با درخواست مطابقت ندارد.');
+        if(!hash_equals($token,(string)($payload['probe']??''))||($payload['unicode']??'')!=='تست 🎬')throw new RuntimeException('پاسخ تست انتقال Telethon با درخواست یا UTF-8 مطابقت ندارد.');
         return $payload;
     }
 
