@@ -7,10 +7,40 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+
+
+_result_stream = None
+
+
+def configure_result_file(path: str) -> None:
+    global _result_stream
+    if not path:
+        return
+    target = Path(path)
+    if target.parent != Path("/var/lib/freebot-mtproto") or not re.fullmatch(r"result-[a-f0-9]{32}\.ndjson", target.name):
+        raise RuntimeError("Result file path is invalid.")
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    _result_stream = os.fdopen(descriptor, "w", encoding="utf-8", buffering=1)
+
+
+def emit_json(payload: dict[str, object]) -> None:
+    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if _result_stream is not None:
+        _result_stream.write(line + "\n")
+        _result_stream.flush()
+    print(line, flush=True)
+
+
+def close_result_file() -> None:
+    global _result_stream
+    if _result_stream is not None:
+        _result_stream.close()
+        _result_stream = None
 
 
 def load_config(path: str) -> dict[str, str]:
@@ -262,7 +292,7 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                     "type": "video",
                     "source_chat_id": str(utils_get_peer_id(entity)),
                 })
-                print(json.dumps(item, ensure_ascii=False, separators=(",", ":")), flush=True)
+                emit_json(item)
                 video_count += 1
                 if video_count % 100 == 0:
                     print(f"Found {video_count} videos in {total_messages} messages...", file=sys.stderr, flush=True)
@@ -356,6 +386,7 @@ def main() -> int:
     parser.add_argument("--download-message", action="store_true")
     parser.add_argument("--message-id", type=int, default=0)
     parser.add_argument("--output", default="")
+    parser.add_argument("--result-file", default="")
     parser.add_argument("--json-input", action="store_true")
     parser.add_argument("--web-action", choices=("send-code", "verify-code", "verify-password", "status"), default="")
     parser.add_argument("--self-test", action="store_true")
@@ -370,6 +401,7 @@ def main() -> int:
     if args.list_videos and args.download_message:
         parser.error("choose only one transfer operation")
     try:
+        configure_result_file(args.result_file)
         input_data: dict[str, object] = {}
         if args.json_input:
             decoded = json.load(sys.stdin)
@@ -377,13 +409,15 @@ def main() -> int:
                 raise RuntimeError("JSON input must be an object.")
             input_data = decoded
         operation = run_web_action(args, input_data) if args.web_action else run(args, input_data)
-        print(json.dumps(asyncio.run(operation), ensure_ascii=False, separators=(",", ":")))
+        emit_json(asyncio.run(operation))
         return 0
     except Exception as error:
         message = str(error) or type(error).__name__
         print(message, file=sys.stderr, flush=True)
-        print(json.dumps({"ok": False, "error": message}, ensure_ascii=False, separators=(",", ":")), flush=True)
+        emit_json({"ok": False, "error": message})
         return 1
+    finally:
+        close_result_file()
 
 
 if __name__ == "__main__":
