@@ -569,6 +569,14 @@ final class MediaQueue
         return $dir.'/result-'.bin2hex(random_bytes(16)).'.ndjson';
     }
 
+    private static function newScannerCaptureFile(string $kind): string
+    {
+        if(!in_array($kind,['stdout','stderr'],true))throw new RuntimeException('نوع فایل خروجی Telethon نامعتبر است.');
+        $dir='/var/lib/freebot-mtproto';if(!is_dir($dir)||!is_writable($dir))throw new RuntimeException('مسیر امن نشست Telethon قابل نوشتن نیست؛ update.sh را اجرا کنید.');
+        foreach(glob($dir.'/capture-*.log')?:[] as $old)if(is_file($old)&&filemtime($old)<time()-3600)@unlink($old);
+        $path=$dir.'/capture-'.$kind.'-'.bin2hex(random_bytes(16)).'.log';$handle=@fopen($path,'x');if($handle===false)throw new RuntimeException('ساخت فایل امن خروجی Telethon ممکن نشد.');@chmod($path,0600);fclose($handle);return $path;
+    }
+
     private static function streamTelegramVideoList(string $sourceChannel,callable $onVideo): array
     {
         $runtime=self::scannerRuntime();$scanner=self::historyScannerStatus();
@@ -607,23 +615,26 @@ final class MediaQueue
         $runtime=self::scannerRuntime();
         if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new RuntimeException('موتور Telethon نصب نیست؛ ابتدا update.sh را اجرا کنید.');
         if(!self::functionEnabled('proc_open'))throw new RuntimeException('تابع proc_open در PHP غیرفعال است.');
-        $resultFile=self::newScannerResultFile();$command=array_merge([$runtime['python'],$runtime['script']],$arguments,['--config',$runtime['config'],'--result-file',$resultFile]);
-        if($input!==[])$command[]='--json-input';
-        $pipes=[];$process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
-        if(!is_resource($process))throw new RuntimeException('اجرای موتور Telethon ممکن نشد.');
-        if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);
-        stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
-        $stdout='';$stderr='';$started=microtime(true);$exitCode=null;$timeout=max(10,min(21600,$timeout));
-        while(true){
-            $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
-            if(strlen($stdout)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);@unlink($resultFile);throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');}
-            $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
-            if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
+        $resultFile='';$stdoutFile='';$stderrFile='';$pipes=[];$process=null;
+        try{
+            $resultFile=self::newScannerResultFile();$stdoutFile=self::newScannerCaptureFile('stdout');$stderrFile=self::newScannerCaptureFile('stderr');
+            $command=array_merge([$runtime['python'],$runtime['script']],$arguments,['--config',$runtime['config'],'--result-file',$resultFile]);if($input!==[])$command[]='--json-input';
+            $process=proc_open($command,[0=>['pipe','r'],1=>['file',$stdoutFile,'ab'],2=>['file',$stderrFile,'ab']],$pipes,__DIR__);if(!is_resource($process))throw new RuntimeException('اجرای موتور Telethon ممکن نشد.');
+            if($input!==[])fwrite($pipes[0],App::j($input));if(isset($pipes[0])&&is_resource($pipes[0]))fclose($pipes[0]);unset($pipes[0]);
+            $started=microtime(true);$exitCode=null;$timeout=max(10,min(21600,$timeout));
+            while(true){
+                clearstatcache(true,$stdoutFile);clearstatcache(true,$stderrFile);if((int)(@filesize($stdoutFile)?:0)>1048576||(int)(@filesize($stderrFile)?:0)>1048576){proc_terminate($process,9);throw new RuntimeException('خروجی موتور Telethon بیش از حد مجاز بود.');}
+                $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
+                if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
+            }
+            $closed=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closed;clearstatcache(true,$resultFile);clearstatcache(true,$stdoutFile);clearstatcache(true,$stderrFile);
+            $stored=is_file($resultFile)?file_get_contents($resultFile,false,null,0,1048577):false;$stdout=file_get_contents($stdoutFile,false,null,0,1048577);$stderr=file_get_contents($stderrFile,false,null,0,1048577);if(is_string($stored)&&trim($stored)!=='')$stdout=$stored;
+            $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',is_string($stdout)?$stdout:'')?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
+            if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim(is_string($stderr)?$stderr:'');if($detail==='')$detail='Telethon هیچ خروجی ثبت نکرد (کد '.($exitCode??'نامشخص').'). نسخه اسکریپت: '.substr(@hash_file('sha256',$runtime['script'])?:'unknown',0,12);throw new RuntimeException(self::cleanError($detail));}
+            return $payload;
+        }finally{
+            foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);@proc_close($process);}foreach([$resultFile,$stdoutFile,$stderrFile] as $file)if($file!=='')@unlink($file);
         }
-        $stdout.=self::drainFinishedPipe($pipes[1],1048576-strlen($stdout));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;$stored=is_file($resultFile)?file_get_contents($resultFile,false,null,0,1048577):false;@unlink($resultFile);if(is_string($stored)&&trim($stored)!=='')$stdout=$stored;
-        $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
-        if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr);if($detail==='')$detail='موتور Telethon بدون پاسخ JSON پایان یافت (کد خروج '.($exitCode??'نامشخص').').';throw new RuntimeException(self::cleanError($detail));}
-        return $payload;
     }
 
     private static function cleanupSetupSession(string $base): void

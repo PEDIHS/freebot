@@ -19,6 +19,8 @@ grep -q -- '--web-action' "$ROOT/scripts/channel_history_scan.py"
 grep -q -- '--list-videos' "$ROOT/scripts/channel_history_scan.py"
 grep -q -- '--download-message' "$ROOT/scripts/channel_history_scan.py"
 grep -q -- '--result-file' "$ROOT/scripts/channel_history_scan.py"
+grep -q "newScannerCaptureFile('stdout')" "$ROOT/media.php"
+grep -Fq "1=>['file',\$stdoutFile,'ab']" "$ROOT/media.php"
 grep -q 'media_channel_import' "$ROOT/admin.php"
 ! grep -q "setSetting('channel_scanner_.*password" "$ROOT/media.php"
 python3 "$ROOT/scripts/channel_history_scan.py" --self-test
