@@ -29,7 +29,10 @@ def configure_result_file(path: str) -> None:
 
 
 def emit_json(payload: dict[str, object]) -> None:
-    line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    # Keep the transport strictly ASCII. Some PHP-FPM/shell locales can corrupt
+    # multibyte channel titles before json_decode sees them; \u escapes round-trip
+    # Persian text and emoji without depending on the process locale.
+    line = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     if _result_stream is not None:
         _result_stream.write(line + "\n")
         _result_stream.flush()
@@ -406,7 +409,7 @@ def main() -> int:
         if args.transport_probe:
             if not re.fullmatch(r"[a-f0-9]{32}", args.transport_probe):
                 raise RuntimeError("Transport probe token is invalid.")
-            emit_json({"ok": True, "probe": args.transport_probe, "pid": os.getpid()})
+            emit_json({"ok": True, "probe": args.transport_probe, "unicode": "تست 🎬", "pid": os.getpid()})
             return 0
         input_data: dict[str, object] = {}
         if args.json_input:
