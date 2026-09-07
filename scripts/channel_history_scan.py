@@ -380,7 +380,9 @@ def main() -> int:
         print(json.dumps(asyncio.run(operation), ensure_ascii=False, separators=(",", ":")))
         return 0
     except Exception as error:
-        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False, separators=(",", ":")))
+        message = str(error) or type(error).__name__
+        print(message, file=sys.stderr, flush=True)
+        print(json.dumps({"ok": False, "error": message}, ensure_ascii=False, separators=(",", ":")), flush=True)
         return 1
 
 

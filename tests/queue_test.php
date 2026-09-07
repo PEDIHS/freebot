@@ -26,6 +26,7 @@ final class App
 require dirname(__DIR__).'/media.php';
 
 function expect(bool $condition,string $message): void{if(!$condition)throw new RuntimeException($message);}
+$pipePair=stream_socket_pair(STREAM_PF_UNIX,STREAM_SOCK_STREAM,STREAM_IPPROTO_IP);expect(is_array($pipePair),'test pipe pair must be available');fwrite($pipePair[1],'{"ok":true}');fclose($pipePair[1]);$drain=new ReflectionMethod(MediaQueue::class,'drainFinishedPipe');$drain->setAccessible(true);expect($drain->invoke(null,$pipePair[0],1024)==='{"ok":true}','finished process output must be drained completely');fclose($pipePair[0]);
 $pdo=App::db();
 foreach(['media_job_events','media_workers','media_jobs','media_batches','products'] as $table)$pdo->exec("DROP TABLE IF EXISTS `$table`");
 $pdo->exec("CREATE TABLE products (id int unsigned AUTO_INCREMENT PRIMARY KEY,title varchar(255) NOT NULL,channel_id varchar(64) NOT NULL,enabled tinyint(1) NOT NULL DEFAULT 1) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");

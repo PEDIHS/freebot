@@ -351,7 +351,7 @@ final class MediaQueue
                 if(microtime(true)-$startedAt>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}
                 usleep(100000);
             }
-            $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+            $buffer.=self::drainFinishedPipe($pipes[1],2097152-strlen($buffer));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));
             foreach(array_filter(array_map('trim',preg_split('/\R/',$buffer)?:[])) as $line){$decoded=json_decode($line,true);if(is_array($decoded))$payload=$decoded;}
             fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
             if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){
@@ -580,9 +580,9 @@ final class MediaQueue
                 $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
                 if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
             }
-            $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';foreach(preg_split('/\R/',$buffer)?:[] as $line)$consume($line);
+            $buffer.=self::drainFinishedPipe($pipes[1],2097152-strlen($buffer));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));foreach(preg_split('/\R/',$buffer)?:[] as $line)$consume($line);
             fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
-            if(($exitCode!==null&&$exitCode>0)||!is_array($summary)||!($summary['ok']??false)){$detail=is_array($summary)?(string)($summary['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
+            if(($exitCode!==null&&$exitCode>0)||!is_array($summary)||!($summary['ok']??false)){$detail=is_array($summary)?(string)($summary['error']??''):'';if($detail==='')$detail=trim($stderr);if($detail==='')$detail='موتور Telethon بدون پاسخ JSON پایان یافت (کد خروج '.($exitCode??'نامشخص').').';throw new RuntimeException(self::cleanError($detail));}
             return $summary;
         }finally{
             foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
@@ -607,9 +607,9 @@ final class MediaQueue
             $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
             if(microtime(true)-$started>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}usleep(100000);
         }
-        $stdout.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;
+        $stdout.=self::drainFinishedPipe($pipes[1],1048576-strlen($stdout));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));fclose($pipes[1]);fclose($pipes[2]);$closed=proc_close($process);if($exitCode===null||$exitCode<0)$exitCode=$closed;
         $lines=array_values(array_filter(array_map('trim',preg_split('/\R/',$stdout)?:[])));$payload=$lines?json_decode((string)end($lines),true):null;
-        if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'موتور Telethon پاسخ معتبر نداد.';throw new RuntimeException(self::cleanError($detail));}
+        if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr);if($detail==='')$detail='موتور Telethon بدون پاسخ JSON پایان یافت (کد خروج '.($exitCode??'نامشخص').').';throw new RuntimeException(self::cleanError($detail));}
         return $payload;
     }
 
@@ -861,6 +861,19 @@ final class MediaQueue
     }
 
     private static function functionEnabled(string $name): bool{$disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));return function_exists($name)&&!in_array($name,$disabled,true);}
+    private static function drainFinishedPipe(mixed $pipe,int $maxBytes): string
+    {
+        if(!is_resource($pipe)||$maxBytes<=0)return '';
+        stream_set_blocking($pipe,false);$data='';$deadline=microtime(true)+2.0;
+        while(strlen($data)<$maxBytes&&microtime(true)<$deadline){
+            $chunk=stream_get_contents($pipe,$maxBytes-strlen($data));
+            if(is_string($chunk)&&$chunk!==''){$data.=$chunk;continue;}
+            if(feof($pipe))break;
+            $read=[$pipe];$write=[];$except=[];$remaining=max(0.0,$deadline-microtime(true));$seconds=(int)$remaining;$microseconds=(int)(($remaining-$seconds)*1000000);
+            $ready=@stream_select($read,$write,$except,$seconds,$microseconds);if($ready===false)break;
+        }
+        return $data;
+    }
     private static function storageRoot(): string{$path=__DIR__.'/storage/media';if(!is_dir($path)&&!@mkdir($path,0750,true)&&!is_dir($path))throw new MediaQueueException('STORAGE_CREATE','ساخت پوشه ذخیره‌سازی ممکن نیست.');return $path;}
     private static function jobDirectory(int $jobId): string{$path=self::storageRoot().'/job_'.$jobId;if(!is_dir($path)&&!@mkdir($path,0750,true)&&!is_dir($path))throw new MediaQueueException('STORAGE_CREATE','ساخت پوشه موقت لینک ممکن نیست.');return $path;}
     private static function maxBytes(): int{return max(5,min(1900,(int)App::setting('downloader_max_mb','45')))*1048576;}
