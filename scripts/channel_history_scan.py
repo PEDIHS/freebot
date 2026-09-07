@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,29 @@ def classify_message(message: object) -> tuple[str | None, int]:
     return None, 0
 
 
+def video_metadata(message: object) -> dict[str, object]:
+    video = getattr(message, "video", None)
+    if video is None:
+        raise RuntimeError("پیام انتخاب‌شده ویدیو نیست.")
+    file_info = getattr(message, "file", None)
+    message_id = int(getattr(message, "id", 0) or 0)
+    file_name = str(getattr(file_info, "name", "") or "").strip()
+    extension = str(getattr(file_info, "ext", "") or "").strip()
+    if not file_name:
+        file_name = f"telegram-{message_id}{extension or '.mp4'}"
+    text = str(getattr(message, "message", "") or "").strip()
+    title = text.splitlines()[0].strip() if text else Path(file_name).stem
+    date = getattr(message, "date", None)
+    return {
+        "message_id": message_id,
+        "file_name": file_name,
+        "title": title[:500] or f"telegram-{message_id}",
+        "file_size": int(getattr(video, "size", 0) or 0),
+        "mime_type": str(getattr(video, "mime_type", "") or "video/mp4"),
+        "date": date.strftime("%Y-%m-%d %H:%M:%S") if date is not None else "",
+    }
+
+
 def self_test() -> None:
     assert target_key("https://t.me/MyChannel/12") == "MyChannel"
     video = SimpleNamespace(video=SimpleNamespace(size=120), photo=None, document=None)
@@ -71,6 +95,14 @@ def self_test() -> None:
     assert classify_message(photo) == ("photo", 50)
     document = SimpleNamespace(video=None, photo=None, document=SimpleNamespace(size=75), gif=None, audio=None, voice=None)
     assert classify_message(document) == ("document", 75)
+    metadata = video_metadata(SimpleNamespace(
+        id=42,
+        video=SimpleNamespace(size=2048, mime_type="video/mp4"),
+        file=SimpleNamespace(name="movie.mp4", ext=".mp4"),
+        message="Movie title\nDescription",
+        date=None,
+    ))
+    assert metadata["message_id"] == 42 and metadata["file_name"] == "movie.mp4" and metadata["title"] == "Movie title"
     assert validate_credentials({"api_id": "12345", "api_hash": "a" * 32, "phone": "+49123456789"}) == (12345, "a" * 32, "+49123456789")
     print("Channel history scanner self-test passed.")
 
@@ -216,6 +248,68 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
         if not await client.is_user_authorized():
             raise RuntimeError("Scanner session is not authorized. Run setup-channel-scanner.sh.")
         entity = await resolve_entity(client, args.channel)
+        if args.list_videos:
+            total_messages = 0
+            video_count = 0
+            last_message_id = 0
+            async for message in client.iter_messages(entity, reverse=True):
+                total_messages += 1
+                last_message_id = max(last_message_id, int(getattr(message, "id", 0) or 0))
+                if getattr(message, "video", None) is None:
+                    continue
+                item = video_metadata(message)
+                item.update({
+                    "type": "video",
+                    "source_chat_id": str(utils_get_peer_id(entity)),
+                })
+                print(json.dumps(item, ensure_ascii=False, separators=(",", ":")), flush=True)
+                video_count += 1
+                if video_count % 100 == 0:
+                    print(f"Found {video_count} videos in {total_messages} messages...", file=sys.stderr, flush=True)
+            return {
+                "ok": True,
+                "type": "summary",
+                "channel_id": str(utils_get_peer_id(entity)),
+                "channel_title": str(getattr(entity, "title", "") or ""),
+                "last_message_id": last_message_id,
+                "message_count": total_messages,
+                "video_count": video_count,
+            }
+        if args.download_message:
+            if args.message_id <= 0:
+                raise RuntimeError("شناسه پیام معتبر نیست.")
+            output = Path(args.output)
+            if not output.is_absolute():
+                raise RuntimeError("مسیر خروجی دانلود باید مطلق باشد.")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            message = await client.get_messages(entity, ids=args.message_id)
+            if message is None or getattr(message, "video", None) is None:
+                raise RuntimeError("ویدیوی پیام در کانال مبدأ پیدا نشد یا دیگر قابل دسترسی نیست.")
+            metadata = video_metadata(message)
+            last_emit = 0.0
+
+            def progress(current: int, total: int) -> None:
+                nonlocal last_emit
+                now = time.monotonic()
+                if now - last_emit < 1.0 and int(current) < int(total):
+                    return
+                last_emit = now
+                print(json.dumps({
+                    "type": "progress",
+                    "downloaded": int(current),
+                    "total": int(total),
+                }, separators=(",", ":")), flush=True)
+
+            downloaded = await client.download_media(message, file=str(output), progress_callback=progress)
+            if not downloaded or not Path(downloaded).is_file():
+                raise RuntimeError("Telethon فایل ویدیو را ایجاد نکرد.")
+            return {
+                "ok": True,
+                "type": "downloaded",
+                "path": str(Path(downloaded)),
+                "size": Path(downloaded).stat().st_size,
+                **metadata,
+            }
         counts = {"video": 0, "photo": 0, "document": 0, "animation": 0, "audio": 0}
         total_messages = 0
         total_bytes = 0
@@ -258,6 +352,10 @@ def main() -> int:
     parser.add_argument("--config", default="/etc/freebot/channel-scanner.env")
     parser.add_argument("--session", default="")
     parser.add_argument("--login-only", action="store_true")
+    parser.add_argument("--list-videos", action="store_true")
+    parser.add_argument("--download-message", action="store_true")
+    parser.add_argument("--message-id", type=int, default=0)
+    parser.add_argument("--output", default="")
     parser.add_argument("--json-input", action="store_true")
     parser.add_argument("--web-action", choices=("send-code", "verify-code", "verify-password", "status"), default="")
     parser.add_argument("--self-test", action="store_true")
@@ -267,6 +365,10 @@ def main() -> int:
         return 0
     if not args.login_only and not args.web_action and not args.channel:
         parser.error("--channel is required")
+    if args.download_message and not args.output:
+        parser.error("--output is required with --download-message")
+    if args.list_videos and args.download_message:
+        parser.error("choose only one transfer operation")
     try:
         input_data: dict[str, object] = {}
         if args.json_input:
