@@ -26,7 +26,7 @@ if [[ -f /etc/nginx/sites-available/freebot ]]; then
 fi
 if [[ -f "$INSTALL_DIR/config.php" ]]; then
   # shellcheck disable=SC2016
-  runuser -u www-data -- /usr/bin/php -r 'require $argv[1]; App::db(); App::q("UPDATE media_batches SET pipeline_depth=4 WHERE source_type=? AND pipeline_depth<4 AND status IN (?,?,?)",["telegram_channel","queued","running","paused"]);' "$INSTALL_DIR/app.php"
+  runuser -u www-data -- /usr/bin/php -r 'require $argv[1]; App::db(); App::q("UPDATE media_batches SET pipeline_depth=4 WHERE source_type=? AND pipeline_depth<4 AND status IN (?,?,?)",["telegram_channel","queued","running","paused"]); App::q("UPDATE media_batches SET status=\"queued\",scan_status=\"queued\",scan_attempts=0,scan_next_attempt_at=NOW(),scan_error=\"صف 0/0 قدیمی بازیابی شد؛ اسکن با منطق جدید دوباره اجرا می‌شود.\",scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,source_last_message_id=0,source_scanned_items=0,source_skipped_items=0,completed_at=NULL WHERE source_type=\"telegram_channel\" AND status=\"completed\" AND total_items=0 AND ((scan_attempts=0 AND source_last_message_id=0) OR (source_video_count>0 AND source_skipped_items<source_video_count))");' "$INSTALL_DIR/app.php"
 fi
 nginx -t
 systemctl daemon-reload
