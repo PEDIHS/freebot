@@ -26,7 +26,7 @@ if [[ -f /etc/nginx/sites-available/freebot ]]; then
 fi
 if [[ -f "$INSTALL_DIR/config.php" ]]; then
   # shellcheck disable=SC2016
-  runuser -u www-data -- /usr/bin/php -r 'require $argv[1]; App::db(); App::q("UPDATE media_batches SET pipeline_depth=4 WHERE source_type=\"telegram_channel\" AND pipeline_depth<4 AND status IN (\"queued\",\"running\",\"paused\")");' "$INSTALL_DIR/app.php"
+  runuser -u www-data -- /usr/bin/php -r 'require $argv[1]; App::db(); App::q("UPDATE media_batches SET pipeline_depth=4 WHERE source_type=? AND pipeline_depth<4 AND status IN (?,?,?)",["telegram_channel","queued","running","paused"]);' "$INSTALL_DIR/app.php"
 fi
 nginx -t
 systemctl daemon-reload
