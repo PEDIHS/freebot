@@ -53,6 +53,15 @@ expect($route->invoke(null,$channels,2000,2001)===['channel_id'=>'-10022222','sl
 expect($route->invoke(null,$channels,2000,4000)===['channel_id'=>'-10022222','slot'=>2,'sequence'=>2000],'second destination boundary must be inclusive');
 expect($route->invoke(null,$channels,2000,4001)===['channel_id'=>'-10033333','slot'=>3,'sequence'=>1],'third destination must start at 4001');
 expect($route->invoke(null,$channels,2000,6001)===null,'overflow must not silently lose videos');
+$editableBatch=MediaQueue::createBatch(1,"https://example.com/e1.mp4\nhttps://example.com/e2.mp4\nhttps://example.com/e3.mp4",'Old routing');
+App::q("UPDATE media_batches SET source_type='telegram_channel',source_channel_id='-100999',source_last_message_id=333,source_scanned_items=3,source_video_count=10,distribution_mode='chunked',destination_channels_json=?,destination_limit=1,scan_status='failed',scan_attempts=3,scan_max_attempts=3,scan_error='capacity',status='completed_with_errors' WHERE id=?",[App::j(['-100123']),$editableBatch]);
+MediaQueue::updateTelegramChannelBatch($editableBatch,'Expanded routing','-100456','-100789',2,5);
+$edited=App::one('SELECT title,status,scan_status,scan_attempts,scan_max_attempts,destination_limit,source_last_message_id FROM media_batches WHERE id=?',[$editableBatch]);
+expect($edited['title']==='Expanded routing'&&$edited['status']==='queued'&&$edited['scan_status']==='queued'&&(int)$edited['scan_attempts']===0,'editing a failed scan must requeue it without losing its batch');
+expect((int)$edited['destination_limit']===2&&(int)$edited['scan_max_attempts']===5&&(int)$edited['source_last_message_id']===333,'capacity, retry and checkpoint must persist after editing');
+$editedRoutes=App::all('SELECT position,target_channel_id,target_slot,target_sequence FROM media_jobs WHERE batch_id=? ORDER BY position',[$editableBatch]);
+expect(count($editedRoutes)===3&&$editedRoutes[0]['target_channel_id']==='-100123'&&$editedRoutes[1]['target_channel_id']==='-100123'&&$editedRoutes[2]['target_channel_id']==='-100456','existing queued jobs must be rerouted in blocks without deletion');
+MediaQueue::cancelBatch($editableBatch);
 App::q("INSERT INTO media_batches(product_id,channel_id,title,source_type,source_channel_id,sequential_mode,pipeline_depth,distribution_mode,destination_channels_json,destination_limit,scan_status,scan_max_attempts,scan_next_attempt_at,status,created_by) VALUES (1,'-100123','Async scan','telegram_channel','-100999',1,2,'single',?,0,'queued',3,NOW(),'queued','test')",[App::j(['-100123'])]);
 $scanBatchId=(int)App::db()->lastInsertId();$scanClaim=$claimScan->invoke(null,'scan-worker-1');
 expect(is_array($scanClaim)&&(int)$scanClaim['id']===$scanBatchId,'download worker must claim queued channel scan');
