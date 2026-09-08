@@ -29,12 +29,14 @@ jobs:
           extensions: curl, mbstring, pdo_mysql, openssl, json, fileinfo
       - name: PHP lint
         run: find . -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck ffmpeg
       - name: Installer tests
         run: bash tests/installer_test.sh
       - name: Historical scanner self-test
         run: python3 scripts/channel_history_scan.py --self-test
+      - name: Explicit video thumbnail test
+        run: python3 tests/video_thumbnail_test.py
       - name: Telethon exec transport test
         run: php tests/telethon_exec_transport_test.php
       - name: Media Queue and Worker tests
