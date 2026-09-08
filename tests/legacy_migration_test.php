@@ -19,10 +19,10 @@ $pdo->exec("CREATE TABLE orders (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,p
 $pdo->exec("CREATE TABLE users (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,telegram_id varchar(32) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE webhook_updates (update_id varchar(32) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE media_batches (id bigint unsigned AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-$pdo->exec("CREATE TABLE media_jobs (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,batch_id bigint unsigned NULL,position int unsigned NOT NULL DEFAULT 0,url text NOT NULL,source_url text NULL,status enum('queued','resolving','done','failed') NOT NULL DEFAULT 'queued',progress decimal(5,2) NOT NULL DEFAULT 0,attempts tinyint unsigned NOT NULL DEFAULT 0,max_attempts tinyint unsigned NOT NULL DEFAULT 3,next_attempt_at datetime NULL,downloaded_bytes bigint unsigned NOT NULL DEFAULT 0,total_bytes bigint unsigned NOT NULL DEFAULT 0,created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+$pdo->exec("CREATE TABLE media_jobs (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,batch_id bigint unsigned NULL,position int unsigned NOT NULL DEFAULT 0,url text NOT NULL,chat_id varchar(64) NOT NULL,source_url text NULL,status enum('queued','resolving','done','failed') NOT NULL DEFAULT 'queued',progress decimal(5,2) NOT NULL DEFAULT 0,attempts tinyint unsigned NOT NULL DEFAULT 0,max_attempts tinyint unsigned NOT NULL DEFAULT 3,next_attempt_at datetime NULL,downloaded_bytes bigint unsigned NOT NULL DEFAULT 0,total_bytes bigint unsigned NOT NULL DEFAULT 0,created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE media_workers (worker_id varchar(190) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("INSERT INTO media_batches(id) VALUES (1)");
-$pdo->exec("INSERT INTO media_jobs(batch_id,position,url,source_url,status) VALUES (1,1,'https://example.test/movie.mp4',NULL,'done'),(1,2,'',NULL,'resolving')");
+$pdo->exec("INSERT INTO media_jobs(batch_id,position,url,chat_id,source_url,status) VALUES (1,1,'https://example.test/movie.mp4','-1001',NULL,'done'),(1,2,'','-1001',NULL,'resolving')");
 $pdo->exec("INSERT INTO media_workers(worker_id) VALUES ('legacy-worker')");
 
 $coreMigration=new ReflectionMethod(App::class,'ensureCoreSchema');
@@ -48,6 +48,8 @@ migrationExpect($statuses[0]['status']==='completed','legacy done job must becom
 migrationExpect($statuses[1]['status']==='failed'&&$statuses[1]['error_code']==='LEGACY_ROW','incomplete legacy job must be quarantined');
 $legacyUrl=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'url'")->fetch(PDO::FETCH_ASSOC);
 migrationExpect(($legacyUrl['Null']??'NO')==='YES','legacy media_jobs.url must become nullable');
+$legacyChatId=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'chat_id'")->fetch(PDO::FETCH_ASSOC);
+migrationExpect(($legacyChatId['Null']??'NO')==='YES','unknown mandatory media_jobs.chat_id must become nullable');
 migrationExpect((string)$pdo->query("SELECT source_url FROM media_jobs WHERE position=1")->fetchColumn()==='https://example.test/movie.mp4','legacy url must be copied to source_url');
 $statusType=(string)$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'status'")->fetch(PDO::FETCH_ASSOC)['Type'];
 migrationExpect($statusType==="enum('queued','downloading','downloaded','uploading','completed','failed','cancelled')",'status enum must be normalized');
