@@ -19,7 +19,7 @@ read -r -p "Phone number with country code (example +49123...): " PHONE
 [[ "$PHONE" =~ ^\+[0-9]{7,18}$ ]] || { echo "Invalid phone number." >&2; exit 1; }
 
 if [[ ! -x /opt/freebot-tools/bin/pip ]]; then python3 -m venv /opt/freebot-tools; fi
-/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade 'Telethon>=1.36,<2'
+/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade 'Telethon>=1.36,<2' 'cryptg>=0.4,<1'
 install -d -o root -g www-data -m 0750 "$CONFIG_DIR"
 install -d -o www-data -g www-data -m 0700 "$SESSION_DIR"
 umask 0027
