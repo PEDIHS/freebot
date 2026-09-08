@@ -149,7 +149,7 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.4.0-channel-distribution') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.4.1-async-channel-scan') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -224,6 +224,16 @@ final class App
             destination_channels_json longtext NULL,
             destination_limit int unsigned NOT NULL DEFAULT 0,
             overflow_items int unsigned NOT NULL DEFAULT 0,
+            scan_status varchar(20) NOT NULL DEFAULT 'completed',
+            scan_attempts tinyint unsigned NOT NULL DEFAULT 0,
+            scan_max_attempts tinyint unsigned NOT NULL DEFAULT 3,
+            scan_next_attempt_at datetime NULL,
+            scan_error text NULL,
+            scan_locked_by varchar(190) NULL,
+            scan_lock_token char(64) NULL,
+            scan_lock_expires_at datetime NULL,
+            scan_heartbeat_at datetime NULL,
+            scan_options_json longtext NULL,
             status enum('queued','running','paused','completed','completed_with_errors','cancelled') NOT NULL DEFAULT 'queued',
             total_items int unsigned NOT NULL DEFAULT 0,
             completed_items int unsigned NOT NULL DEFAULT 0,
@@ -237,6 +247,7 @@ final class App
             created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_media_batch_status(status),
+            INDEX idx_media_batch_scan(scan_status,scan_next_attempt_at,scan_lock_expires_at),
             INDEX idx_media_batch_product(product_id),
             CONSTRAINT fk_media_batch_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -257,6 +268,16 @@ final class App
             'destination_channels_json'=>"longtext NULL",
             'destination_limit'=>"int unsigned NOT NULL DEFAULT 0",
             'overflow_items'=>"int unsigned NOT NULL DEFAULT 0",
+            'scan_status'=>"varchar(20) NOT NULL DEFAULT 'completed'",
+            'scan_attempts'=>"tinyint unsigned NOT NULL DEFAULT 0",
+            'scan_max_attempts'=>"tinyint unsigned NOT NULL DEFAULT 3",
+            'scan_next_attempt_at'=>"datetime NULL",
+            'scan_error'=>"text NULL",
+            'scan_locked_by'=>"varchar(190) NULL",
+            'scan_lock_token'=>"char(64) NULL",
+            'scan_lock_expires_at'=>"datetime NULL",
+            'scan_heartbeat_at'=>"datetime NULL",
+            'scan_options_json'=>"longtext NULL",
             'status'=>"enum('queued','running','paused','completed','completed_with_errors','cancelled') NOT NULL DEFAULT 'queued'",
             'total_items'=>"int unsigned NOT NULL DEFAULT 0",
             'completed_items'=>"int unsigned NOT NULL DEFAULT 0",
@@ -273,6 +294,8 @@ final class App
         foreach($batchColumns as $column=>$definition){
             if(!$pdo->query("SHOW COLUMNS FROM media_batches LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_batches ADD COLUMN `{$column}` {$definition}");
         }
+        $scanIndex=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_batches' AND index_name='idx_media_batch_scan' LIMIT 1")->fetch();
+        if(!$scanIndex)$pdo->exec("CREATE INDEX idx_media_batch_scan ON media_batches(scan_status,scan_next_attempt_at,scan_lock_expires_at)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS media_jobs (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             batch_id bigint unsigned NOT NULL,
@@ -362,6 +385,13 @@ final class App
         ];
         foreach($jobColumns as $column=>$definition){
             if(!$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_jobs ADD COLUMN `{$column}` {$definition}");
+        }
+        // Old downloader builds used a mandatory `url` field. Keep its data,
+        // but make it nullable so every new insert can use source_url only.
+        $legacyUrl=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'url'")->fetch();
+        if($legacyUrl){
+            $pdo->exec("UPDATE media_jobs SET source_url=COALESCE(NULLIF(source_url,''),url) WHERE url IS NOT NULL AND TRIM(url)<>''");
+            $pdo->exec("ALTER TABLE media_jobs MODIFY `url` text NULL");
         }
         $statusColumn=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'status'")->fetch();
         $statusType=strtolower((string)($statusColumn['Type']??''));

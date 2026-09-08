@@ -19,10 +19,10 @@ $pdo->exec("CREATE TABLE orders (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,p
 $pdo->exec("CREATE TABLE users (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,telegram_id varchar(32) NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE webhook_updates (update_id varchar(32) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE media_batches (id bigint unsigned AUTO_INCREMENT PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-$pdo->exec("CREATE TABLE media_jobs (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,batch_id bigint unsigned NULL,position int unsigned NOT NULL DEFAULT 0,source_url text NULL,status enum('queued','resolving','done','failed') NOT NULL DEFAULT 'queued',progress decimal(5,2) NOT NULL DEFAULT 0,attempts tinyint unsigned NOT NULL DEFAULT 0,max_attempts tinyint unsigned NOT NULL DEFAULT 3,next_attempt_at datetime NULL,downloaded_bytes bigint unsigned NOT NULL DEFAULT 0,total_bytes bigint unsigned NOT NULL DEFAULT 0,created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+$pdo->exec("CREATE TABLE media_jobs (id bigint unsigned AUTO_INCREMENT PRIMARY KEY,batch_id bigint unsigned NULL,position int unsigned NOT NULL DEFAULT 0,url text NOT NULL,source_url text NULL,status enum('queued','resolving','done','failed') NOT NULL DEFAULT 'queued',progress decimal(5,2) NOT NULL DEFAULT 0,attempts tinyint unsigned NOT NULL DEFAULT 0,max_attempts tinyint unsigned NOT NULL DEFAULT 3,next_attempt_at datetime NULL,downloaded_bytes bigint unsigned NOT NULL DEFAULT 0,total_bytes bigint unsigned NOT NULL DEFAULT 0,created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("CREATE TABLE media_workers (worker_id varchar(190) PRIMARY KEY) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 $pdo->exec("INSERT INTO media_batches(id) VALUES (1)");
-$pdo->exec("INSERT INTO media_jobs(batch_id,position,source_url,status) VALUES (1,1,'https://example.test/movie.mp4','done'),(1,2,NULL,'resolving')");
+$pdo->exec("INSERT INTO media_jobs(batch_id,position,url,source_url,status) VALUES (1,1,'https://example.test/movie.mp4',NULL,'done'),(1,2,'',NULL,'resolving')");
 $pdo->exec("INSERT INTO media_workers(worker_id) VALUES ('legacy-worker')");
 
 $coreMigration=new ReflectionMethod(App::class,'ensureCoreSchema');
@@ -35,7 +35,7 @@ $mediaMigration->invoke(null,$pdo);
 migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM webhook_updates LIKE 'created_at'")->fetch(),'webhook_updates.created_at must be repaired');
 foreach(['username','first_name','last_name','balance','blocked','state','state_data','inline_menu_ready','created_at','last_seen_at'] as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM users LIKE ".$pdo->quote($column))->fetch(),"missing migrated users.{$column}");
 
-$requiredBatchColumns=['source_type','source_channel_id','source_channel_title','source_last_message_id','source_scanned_items','sequential_mode','pipeline_depth','distribution_mode','destination_channels_json','destination_limit','overflow_items'];
+$requiredBatchColumns=['source_type','source_channel_id','source_channel_title','source_last_message_id','source_scanned_items','sequential_mode','pipeline_depth','distribution_mode','destination_channels_json','destination_limit','overflow_items','scan_status','scan_attempts','scan_max_attempts','scan_next_attempt_at','scan_error','scan_locked_by','scan_lock_token','scan_lock_expires_at','scan_heartbeat_at','scan_options_json'];
 foreach($requiredBatchColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_batches LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_batches.{$column}");
 $requiredJobColumns=['source_host','detected_title','engine','download_attempts','upload_attempts','download_speed_bps','upload_speed_bps','eta_seconds','file_path','file_name','mime_type','source_chat_id','source_message_id','source_date','target_channel_id','target_slot','target_sequence','telegram_message_id','error_code','error_message','locked_by','lock_token','lock_expires_at','heartbeat_at','started_at','finished_at'];
 foreach($requiredJobColumns as $column)migrationExpect((bool)$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch(),"missing migrated media_jobs.{$column}");
@@ -46,6 +46,9 @@ foreach($requiredHistoryColumns as $column)migrationExpect((bool)$pdo->query("SH
 $statuses=$pdo->query("SELECT position,status,error_code FROM media_jobs ORDER BY position")->fetchAll(PDO::FETCH_ASSOC);
 migrationExpect($statuses[0]['status']==='completed','legacy done job must become completed');
 migrationExpect($statuses[1]['status']==='failed'&&$statuses[1]['error_code']==='LEGACY_ROW','incomplete legacy job must be quarantined');
+$legacyUrl=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'url'")->fetch(PDO::FETCH_ASSOC);
+migrationExpect(($legacyUrl['Null']??'NO')==='YES','legacy media_jobs.url must become nullable');
+migrationExpect((string)$pdo->query("SELECT source_url FROM media_jobs WHERE position=1")->fetchColumn()==='https://example.test/movie.mp4','legacy url must be copied to source_url');
 $statusType=(string)$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'status'")->fetch(PDO::FETCH_ASSOC)['Type'];
 migrationExpect($statusType==="enum('queued','downloading','downloaded','uploading','completed','failed','cancelled')",'status enum must be normalized');
 
