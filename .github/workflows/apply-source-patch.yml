@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'patches/fix_storage_admission.py'
+      - 'patches/fix_explicit_video_thumbnails.py'
 
 permissions:
   contents: write
@@ -17,16 +17,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply storage admission guard
-        run: python3 patches/fix_storage_admission.py
+      - name: Apply explicit thumbnail fix
+        run: python3 patches/fix_explicit_video_thumbnails.py
       - name: Validate changed files
         run: |
+          python3 -m py_compile scripts/channel_history_scan.py
+          python3 scripts/channel_history_scan.py --self-test
           php -l media.php
           git diff --check
       - name: Commit source changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add media.php
-          git commit -m "Guard parallel downloads against disk exhaustion"
+          git add scripts/channel_history_scan.py media.php VERSION
+          git commit -m "Fix Telegram video thumbnails and covers"
           git push origin HEAD:main
