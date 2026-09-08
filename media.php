@@ -601,7 +601,7 @@ final class MediaQueue
         }
         $complete=in_array($status,['completed','completed_with_errors','cancelled'],true);
         App::q('UPDATE media_batches SET status=?,total_items=?,completed_items=?,failed_items=?,current_item_id=NULL,completed_at='.($complete?'COALESCE(completed_at,NOW())':'NULL').',updated_at=NOW() WHERE id=?',[$status,$total,$done,$failed,$batchId]);
-        if($complete&&(string)($batch['notification_status']??'')!==$status){
+        if($complete&&$total>0&&(string)($batch['notification_status']??'')!==$status){
             $icon=$status==='completed'?'✅':($status==='cancelled'?'⛔️':'⚠️');
             $destinations=json_decode((string)($batch['destination_channels_json']??''),true);if(!is_array($destinations)||$destinations===[])$destinations=[$batch['channel_id']];
             App::sendLog($icon.' <b>پایان دسته دانلود #'.$batchId.'</b>'."\nعنوان: ".App::h($batch['title'])."\nمقصدها: <code>".App::h(implode(' , ',array_map('strval',$destinations)))."</code>\nموفق: <b>{$done}</b> | خطا: <b>{$failed}</b> | کل: <b>{$total}</b>");
