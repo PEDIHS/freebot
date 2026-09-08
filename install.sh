@@ -5,11 +5,11 @@ REPO_URL="${FREEBOT_REPO_URL:-https://github.com/PEDIHS/freebot.git}"
 INSTALL_DIR="${FREEBOT_INSTALL_DIR:-/var/www/freebot}"
 DOMAIN="${FREEBOT_DOMAIN:-}"
 EMAIL="${FREEBOT_EMAIL:-}"
-DOWNLOAD_WORKERS="${FREEBOT_DOWNLOAD_WORKERS:-2}"
-UPLOAD_WORKERS="${FREEBOT_UPLOAD_WORKERS:-2}"
+DOWNLOAD_WORKERS="${FREEBOT_DOWNLOAD_WORKERS:-4}"
+UPLOAD_WORKERS="${FREEBOT_UPLOAD_WORKERS:-4}"
 ENABLE_SSL=1
 
-usage(){ echo "Usage: sudo bash install.sh --domain bot.example.com [--email you@example.com] [--install-dir /var/www/freebot] [--download-workers 2] [--upload-workers 2] [--no-ssl]"; }
+usage(){ echo "Usage: sudo bash install.sh --domain bot.example.com [--email you@example.com] [--install-dir /var/www/freebot] [--download-workers 4] [--upload-workers 4] [--no-ssl]"; }
 while (($#)); do
   case "$1" in
     --domain) DOMAIN="${2:-}"; shift 2;;

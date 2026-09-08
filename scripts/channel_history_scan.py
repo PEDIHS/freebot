@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -138,6 +139,8 @@ def self_test() -> None:
     assert metadata["message_id"] == 42 and metadata["file_name"] == "movie.mp4" and metadata["title"] == "Movie title"
     assert validate_credentials({"api_id": "12345", "api_hash": "a" * 32, "phone": "+49123456789"}) == (12345, "a" * 32, "+49123456789")
     assert validate_transfer_size(1024 * 1024 * 1024) == 1024 * 1024 * 1024
+    assert display_dimensions(1920, 1080, 90) == (1080, 1920)
+    assert display_dimensions(1920, 1080, 0) == (1920, 1080)
     print("Channel history scanner self-test passed.")
 
 
@@ -161,6 +164,99 @@ def validate_transfer_size(size: int) -> int:
     if size > limit:
         raise RuntimeError("حجم فایل از سقف ۱ گیگابایت بیشتر است.")
     return size
+
+
+def parallel_memory_session(path: str) -> object:
+    from telethon.sessions import MemorySession, SQLiteSession
+
+    source = SQLiteSession(path)
+    try:
+        if source.auth_key is None or not source.dc_id or not source.server_address or not source.port:
+            raise RuntimeError("نشست تلگرام مجاز نیست؛ اتصال حساب را دوباره انجام دهید.")
+        session = MemorySession()
+        session.set_dc(source.dc_id, source.server_address, source.port)
+        session.auth_key = source.auth_key
+        return session
+    finally:
+        source.close()
+
+
+def display_dimensions(width: int, height: int, rotation: int) -> tuple[int, int]:
+    if abs(rotation) % 180 == 90:
+        return height, width
+    return width, height
+
+
+def ffprobe_video_metadata(path: Path) -> dict[str, object]:
+    command = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height,duration,codec_name:stream_tags=rotate:stream_side_data=rotation:format=duration,format_name",
+        "-of", "json", str(path),
+    ]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"ffprobe برای بررسی ویدیو اجرا نشد: {error}") from error
+    if result.returncode != 0:
+        raise RuntimeError("ffprobe نتوانست مشخصات فایل ویدیو را بخواند: " + (result.stderr.strip() or "unknown error"))
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("خروجی ffprobe معتبر نیست.") from error
+    streams = payload.get("streams") or []
+    if not streams or not isinstance(streams[0], dict):
+        raise RuntimeError("فایل نهایی Stream ویدیویی معتبر ندارد.")
+    stream = streams[0]
+    width = int(stream.get("width") or 0)
+    height = int(stream.get("height") or 0)
+    duration_value = stream.get("duration") or (payload.get("format") or {}).get("duration") or 0
+    try:
+        duration = max(1, int(float(duration_value) + 0.999))
+    except (TypeError, ValueError):
+        duration = 0
+    rotation = 0
+    tags = stream.get("tags") or {}
+    try:
+        rotation = int(float(tags.get("rotate") or 0))
+    except (TypeError, ValueError):
+        rotation = 0
+    for item in stream.get("side_data_list") or []:
+        if isinstance(item, dict) and item.get("rotation") is not None:
+            try:
+                rotation = int(float(item["rotation"]))
+            except (TypeError, ValueError):
+                pass
+            break
+    width, height = display_dimensions(width, height, rotation)
+    if width <= 1 or height <= 1 or duration <= 0:
+        raise RuntimeError(f"ابعاد یا مدت ویدیو معتبر نیست: {width}x{height} / {duration}s")
+    format_name = str((payload.get("format") or {}).get("format_name") or "").lower()
+    suffix = path.suffix.lower()
+    mp4_container = suffix in {".mp4", ".m4v"} or "mp4" in format_name
+    return {
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "rotation": rotation,
+        "codec": str(stream.get("codec_name") or ""),
+        "format": format_name,
+        "telegram_video": mp4_container,
+        "supports_streaming": mp4_container,
+    }
+
+
+def explicit_video_attributes(path: Path, metadata: dict[str, object]) -> list[object]:
+    from telethon.tl.types import DocumentAttributeFilename, DocumentAttributeVideo
+
+    return [
+        DocumentAttributeFilename(path.name),
+        DocumentAttributeVideo(
+            duration=int(metadata["duration"]),
+            w=int(metadata["width"]),
+            h=int(metadata["height"]),
+            supports_streaming=bool(metadata["supports_streaming"]),
+        ),
+    ]
 
 
 def friendly_error(error: Exception) -> str:
@@ -280,8 +376,9 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
     if not api_id.isdigit() or not api_hash:
         raise RuntimeError("TELEGRAM_API_ID/API_HASH are not configured.")
 
+    session_object = parallel_memory_session(session) if args.parallel_session else session
     client = TelegramClient(
-        session,
+        session_object,
         int(api_id),
         api_hash,
         connection_retries=10,
@@ -322,12 +419,27 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                     "total": int(total),
                 })
 
+            effective_force_document = bool(args.force_document)
+            upload_metadata: dict[str, object] = {}
+            attributes = None
+            mime_type = None
+            supports_streaming = False
+            if not effective_force_document:
+                upload_metadata = ffprobe_video_metadata(upload)
+                if not bool(upload_metadata["telegram_video"]):
+                    effective_force_document = True
+                else:
+                    attributes = explicit_video_attributes(upload, upload_metadata)
+                    mime_type = "video/mp4"
+                    supports_streaming = bool(upload_metadata["supports_streaming"])
             message = await client.send_file(
                 entity,
                 str(upload),
                 caption=None,
-                force_document=bool(args.force_document),
-                supports_streaming=not bool(args.force_document),
+                force_document=effective_force_document,
+                supports_streaming=supports_streaming,
+                mime_type=mime_type,
+                attributes=attributes,
                 part_size_kb=512,
                 progress_callback=upload_progress,
             )
@@ -340,6 +452,8 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                 "message_id": message_id,
                 "chat_id": str(utils_get_peer_id(entity)),
                 "size": size,
+                "media_type": "document" if effective_force_document else "video",
+                "video_metadata": upload_metadata,
             }
         if args.list_videos:
             from telethon.tl.types import InputMessagesFilterVideo
@@ -481,6 +595,7 @@ def main() -> int:
     parser.add_argument("--upload-file", default="")
     parser.add_argument("--destination", default="")
     parser.add_argument("--force-document", action="store_true")
+    parser.add_argument("--parallel-session", action="store_true")
     parser.add_argument("--message-id", type=int, default=0)
     parser.add_argument("--min-message-id", type=int, default=0)
     parser.add_argument("--output", default="")

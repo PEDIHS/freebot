@@ -61,7 +61,7 @@ final class MediaQueue
         if(in_array($sourceChannel,$destinations,true))throw new RuntimeException('کانال مبدأ نمی‌تواند یکی از کانال‌های مقصد باشد.');
         foreach($destinations as $destination)self::assertCanPost($destination);
         if(!self::historyScannerStatus()['ready'])throw new RuntimeException('ابتدا حساب تلگرام را از بخش «تنظیم اسکنر کانال» متصل کنید.');
-        $maxAttempts=max(1,min(5,$maxAttempts));$createdBy=mb_substr($createdBy,0,64);$destinationLimit=max(1,min(100000,$destinationLimit));$pipelineDepth=1;
+        $maxAttempts=max(1,min(5,$maxAttempts));$createdBy=mb_substr($createdBy,0,64);$destinationLimit=max(1,min(100000,$destinationLimit));$pipelineDepth=max(4,min(8,$pipelineDepth));
         $title=trim($title)!==''?trim($title):'انتقال کانال '.$sourceChannel;
         $distributionMode=count($destinations)>1?'chunked':'single';
         App::q("INSERT INTO media_batches(product_id,channel_id,title,caption_template,upload_mode,source_type,source_channel_id,sequential_mode,pipeline_depth,distribution_mode,destination_channels_json,destination_limit,scan_status,scan_attempts,scan_max_attempts,scan_next_attempt_at,scan_options_json,status,total_items,created_by,created_at,updated_at) VALUES (?,?,?,'','auto','telegram_channel',?,1,?,?,?,?, 'queued',0,?,NOW(),?,'queued',0,?,NOW(),NOW())",[$productId,$primary,mb_substr($title,0,255),$sourceChannel,$pipelineDepth,$distributionMode,App::j($destinations),$distributionMode==='chunked'?$destinationLimit:0,$maxAttempts,App::j(['skip_existing'=>$skipExisting]),$createdBy]);
@@ -274,11 +274,10 @@ final class MediaQueue
         self::registerWorker($workerId,$role);
         $status=$role==='download'?'queued':'downloaded';$lease=self::lockSeconds();
         $orderGuard=$role==='download'
-            ?"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<=GREATEST(CAST(j.position AS SIGNED)-CAST(CASE WHEN b.source_type='telegram_channel' THEN 1 ELSE GREATEST(1,COALESCE(b.pipeline_depth,1)) END AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled')))"
-            :"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<j.position AND CAST(CASE WHEN OCTET_LENGTH(previous_job.target_channel_id)>0 THEN previous_job.target_channel_id ELSE b.channel_id END AS BINARY)=CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) AND previous_job.status NOT IN ('completed','failed','cancelled')))";
-        $engineGuard=$role==='download'?" AND (COALESCE(j.engine,'')<>'telegram-mtproto' OR NOT EXISTS (SELECT 1 FROM media_jobs active_tg WHERE active_tg.engine='telegram-mtproto' AND active_tg.status='downloading' AND active_tg.lock_expires_at>=NOW()))":'';
+            ?"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<=GREATEST(CAST(j.position AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled')))"
+            :"(COALESCE(b.sequential_mode,0)=0 OR (b.source_type='telegram_channel' AND NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND CAST(CASE WHEN OCTET_LENGTH(previous_job.target_channel_id)>0 THEN previous_job.target_channel_id ELSE b.channel_id END AS BINARY)=CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) AND COALESCE(previous_job.target_sequence,previous_job.position)<=GREATEST(CAST(COALESCE(j.target_sequence,j.position) AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled'))) OR (b.source_type<>'telegram_channel' AND NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<j.position AND CAST(CASE WHEN OCTET_LENGTH(previous_job.target_channel_id)>0 THEN previous_job.target_channel_id ELSE b.channel_id END AS BINARY)=CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) AND previous_job.status NOT IN ('completed','failed','cancelled')))))";
         for($attempt=0;$attempt<10;$attempt++){
-            $candidate=App::one("SELECT j.id FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.status=? AND b.status IN ('queued','running') AND COALESCE(b.scan_status,'completed')='completed' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=NOW()) AND (j.lock_expires_at IS NULL OR j.lock_expires_at<NOW()) AND {$orderGuard}{$engineGuard} ORDER BY b.id,j.position,j.id LIMIT 1",[$status]);
+            $candidate=App::one("SELECT j.id FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.status=? AND b.status IN ('queued','running') AND COALESCE(b.scan_status,'completed')='completed' AND (j.next_attempt_at IS NULL OR j.next_attempt_at<=NOW()) AND (j.lock_expires_at IS NULL OR j.lock_expires_at<NOW()) AND {$orderGuard} ORDER BY b.id,j.position,j.id LIMIT 1",[$status]);
             if(!$candidate)return null;$token=bin2hex(random_bytes(32));$target=$role==='download'?'downloading':'uploading';$attemptColumn=$role==='download'?'download_attempts':'upload_attempts';
             $claimed=App::q("UPDATE media_jobs SET status=?,progress=IF(?='download',GREATEST(progress,1),GREATEST(progress,72)),attempts=attempts+1,{$attemptColumn}={$attemptColumn}+1,locked_by=?,lock_token=?,lock_expires_at=DATE_ADD(NOW(),INTERVAL {$lease} SECOND),heartbeat_at=NOW(),started_at=COALESCE(started_at,NOW()),next_attempt_at=NULL,error_code=NULL,error_message=NULL,updated_at=NOW() WHERE id=? AND status=? AND (lock_expires_at IS NULL OR lock_expires_at<NOW())",[$target,$role,$workerId,$token,$candidate['id'],$status])->rowCount();
             if($claimed!==1)continue;
@@ -439,9 +438,6 @@ final class MediaQueue
         $expected=max(0,(int)($job['total_bytes']??0));
         if($expected>self::maxBytes())throw new MediaQueueException('SIZE_LIMIT','حجم ویدیو از سقف '.self::humanBytes(self::maxBytes()).' بیشتر است.');
         self::assertStorageCapacity($expected);
-        $lockName='freebot-mtproto-session';
-        $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
-        if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال استفاده است؛ Job خودکار دوباره تلاش می‌شود.',10);
         $process=null;$pipes=[];$closed=false;$resultFile='';
         try{
             $resultFile=self::newScannerResultFile();
@@ -454,7 +450,7 @@ final class MediaQueue
             if($name===''||$name==='video')$name='telegram-'.(int)$resolved['message_id'].'.mp4';
             if(pathinfo($name,PATHINFO_EXTENSION)==='')$name.='.mp4';
             $target=$dir.'/'.$name;
-            $command=[$runtime['python'],$runtime['script'],'--download-message','--channel',(string)$resolved['chat_id'],'--message-id',(string)$resolved['message_id'],'--output',$target,'--session',$scanner['session_base'],'--config',$runtime['config'],'--result-file',$resultFile];
+            $command=[$runtime['python'],$runtime['script'],'--download-message','--channel',(string)$resolved['chat_id'],'--message-id',(string)$resolved['message_id'],'--output',$target,'--session',$scanner['session_base'],'--parallel-session','--config',$runtime['config'],'--result-file',$resultFile];
             $input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
             $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__);
             if(!is_resource($process))throw new MediaQueueException('MTPROTO_START','اجرای دانلود Telethon ممکن نشد.');
@@ -493,7 +489,6 @@ final class MediaQueue
             if($resultFile!=='')@unlink($resultFile);
             foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);
             if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}
-            try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
         }
     }
 
@@ -587,7 +582,9 @@ final class MediaQueue
     {
         if(!self::isSafeExistingFile($path))throw new MediaQueueException('UPLOAD_FILE_MISSING','فایل آماده آپلود پیدا نشد.');
         $mime=self::detectMime($path,(string)($job['mime_type']??''));$mode=(string)$job['upload_mode'];$target=self::jobTargetChannel($job);
-        $method=$mode==='document'?'sendDocument':(($mode==='video'||str_starts_with($mime,'video/'))?'sendVideo':'sendDocument');
+        $telegramVideo=in_array(strtolower($mime),['video/mp4','video/x-m4v'],true);
+        $method=$mode==='document'?'sendDocument':(($mode==='video'||($mode==='auto'&&$telegramVideo))?'sendVideo':'sendDocument');
+        if($method==='sendVideo'&&!$telegramVideo){self::event((int)$job['id'],'warning','format','فرمت فایل برای Video استاندارد تلگرام مناسب نیست؛ فایل به‌صورت Document ارسال می‌شود.',['mime'=>$mime]);$method='sendDocument';}
         $size=(int)(filesize($path)?:0);
         if(((string)($job['engine']??'')==='telegram-mtproto'||$size>50*1024*1024)&&(string)App::setting('telegram_mtproto_upload','1')==='1'&&self::historyScannerStatus()['ready'])return self::uploadWithTelethon($job,$path,$mime,$method==='sendDocument');
         if($size>50*1024*1024)throw new MediaQueueException('MTPROTO_UPLOAD_REQUIRED','برای آپلود فایل بزرگ‌تر از ۵۰ مگابایت، حساب Telethon باید متصل و «آپلود MTProto» فعال باشد.');
@@ -601,12 +598,10 @@ final class MediaQueue
         if(!$scanner['ready']||!is_executable($runtime['python'])||!is_file($runtime['script']))throw new MediaQueueException('MTPROTO_NOT_READY','موتور آپلود MTProto آماده نیست؛ اتصال حساب تلگرام و update.sh را بررسی کنید.');
         if(!self::functionEnabled('proc_open'))throw new MediaQueueException('PROC_OPEN_DISABLED','تابع proc_open در PHP غیرفعال است.');
         $size=(int)(filesize($path)?:0);if($size<=0||$size>self::maxBytes())throw new MediaQueueException('SIZE_LIMIT','حجم فایل خارج از سقف ۱ گیگابایت است.');
-        $lockName='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
-        if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال انتقال فایل دیگری است؛ Job خودکار دوباره تلاش می‌شود.',10);
         $process=null;$pipes=[];$resultFile='';$closed=false;
         try{
             $resultFile=self::newScannerResultFile();
-            $command=[$runtime['python'],$runtime['script'],'--upload-file',$path,'--destination',$target,'--session',$scanner['session_base'],'--config',$runtime['config'],'--result-file',$resultFile];
+            $command=[$runtime['python'],$runtime['script'],'--upload-file',$path,'--destination',$target,'--session',$scanner['session_base'],'--parallel-session','--config',$runtime['config'],'--result-file',$resultFile];
             if($forceDocument)$command[]='--force-document';
             $input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
             $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__,null,['bypass_shell'=>true]);
@@ -636,7 +631,7 @@ final class MediaQueue
             $media=$forceDocument?'document':'video';
             return ['message_id'=>$messageId,'date'=>time(),'chat'=>['id'=>$target],$media=>['file_id'=>null,'file_size'=>$size,'mime_type'=>$mime]];
         }finally{
-            if($resultFile!=='')@unlink($resultFile);foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
+            if($resultFile!=='')@unlink($resultFile);foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}
         }
     }
 
@@ -649,7 +644,12 @@ final class MediaQueue
     private static function telegramFileRequest(string $method,string $chatId,string $path,string $mime,array $job): array
     {
         $jobId=(int)$job['id'];$field=$method==='sendVideo'?'video':'document';$data=['chat_id'=>$chatId,$field=>new CURLFile($path,$mime,basename($path))];
-        if($method==='sendVideo')$data['supports_streaming']='true';
+        if($method==='sendVideo'){
+            $meta=self::telegramVideoMetadata($path);
+            if($meta===[])throw new MediaQueueException('VIDEO_METADATA','ابعاد و مدت ویدیو با ffprobe قابل تشخیص نیست؛ برای جلوگیری از Preview خراب ارسال متوقف شد.');
+            $data['supports_streaming']='true';$data['width']=(string)$meta['width'];$data['height']=(string)$meta['height'];$data['duration']=(string)$meta['duration'];
+            self::event($jobId,'info','video_metadata','متادیتای واقعی ویدیو برای Telegram ثبت شد.',$meta);
+        }
         $ch=curl_init('https://api.telegram.org/bot'.App::token().'/'.$method);$last=0.0;$lastProgress=-1;$startedAt=microtime(true);
         curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$data,CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>20,CURLOPT_TIMEOUT=>self::uploadTimeout(),CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_HTTPHEADER=>['Accept: application/json'],CURLOPT_NOPROGRESS=>false,CURLOPT_XFERINFOFUNCTION=>static function($ch,float $dt,float $dn,float $total,float $now)use($job,&$last,&$lastProgress,$startedAt):int{$percent=$total>0?(int)min(99,max(72,72+($now/$total)*27)):72;$time=microtime(true);if($percent>=$lastProgress+2||$time-$last>2){$last=$time;$lastProgress=$percent;try{if(!self::updateTransferProgress($job,'upload',(int)$now,(int)$total,$startedAt,72,27))return 1;}catch(Throwable){return 1;}}return 0;}]);
         $body=curl_exec($ch);$err=curl_error($ch);$status=(int)curl_getinfo($ch,CURLINFO_HTTP_CODE);curl_close($ch);
@@ -966,7 +966,7 @@ final class MediaQueue
         return App::all("SELECT MAX(CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY)) channel_id,MIN(COALESCE(j.target_slot,1)) target_slot,COUNT(*) total,SUM(j.status='completed') completed,SUM(j.status='failed') failed,SUM(j.status='cancelled') cancelled,SUM(j.status NOT IN ('completed','failed','cancelled')) pending,COALESCE(SUM(j.total_bytes),0) total_bytes FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.batch_id=? GROUP BY CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) ORDER BY target_slot",[$batchId]);
     }
 
-    public static function recentJobs(int $limit=100): array{return App::all("SELECT j.*,b.title batch_title,b.channel_id,CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END effective_channel_id,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id ORDER BY j.id DESC LIMIT ".max(1,min(500,$limit)));}
+    public static function recentJobs(int $limit=100): array{return App::all("SELECT j.*,b.title batch_title,b.channel_id,CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END effective_channel_id,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id ORDER BY CASE j.status WHEN 'downloading' THEN 0 WHEN 'uploading' THEN 1 WHEN 'downloaded' THEN 2 WHEN 'queued' THEN 3 WHEN 'failed' THEN 4 WHEN 'cancelled' THEN 5 ELSE 6 END,CASE WHEN j.status IN ('downloading','uploading') THEN j.updated_at END DESC,j.id DESC LIMIT ".max(1,min(500,$limit)));}
     public static function jobEvents(int $jobId,int $limit=100): array{return App::all('SELECT * FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT '.max(1,min(500,$limit)),[$jobId]);}
 
     public static function statusLabel(string $status): string
@@ -1067,6 +1067,7 @@ final class MediaQueue
 
     private static function aria2Path(): ?string{return self::binaryPath('downloader_aria2_path',['/usr/bin/aria2c','/usr/local/bin/aria2c']);}
     private static function ffmpegPath(): ?string{return self::binaryPath('downloader_ffmpeg_path',['/usr/bin/ffmpeg','/usr/local/bin/ffmpeg']);}
+    private static function ffprobePath(): ?string{$ffmpeg=self::ffmpegPath();$defaults=['/usr/bin/ffprobe','/usr/local/bin/ffprobe'];if($ffmpeg!==null)array_unshift($defaults,dirname($ffmpeg).'/ffprobe');foreach(array_unique($defaults) as $path)if(is_file($path)&&is_executable($path))return $path;return null;}
     private static function mediainfoPath(): ?string{return self::binaryPath('downloader_mediainfo_path',['/usr/bin/mediainfo','/usr/local/bin/mediainfo']);}
     private static function downloadTimeout(): int{return max(300,min(21600,(int)App::setting('media_download_timeout','3600')));}
     private static function uploadTimeout(): int{return max(300,min(21600,(int)App::setting('media_upload_timeout','3600')));}
@@ -1079,6 +1080,18 @@ final class MediaQueue
     private static function parseSize(string $value): int
     {
         if(!preg_match('/^(\d+(?:\.\d+)?)(KiB|MiB|GiB|B)$/i',trim($value),$m))return 0;$number=(float)$m[1];$unit=strtolower($m[2]);$factor=['b'=>1,'kib'=>1024,'mib'=>1048576,'gib'=>1073741824][$unit]??1;return (int)round($number*$factor);
+    }
+
+    private static function telegramVideoMetadata(string $path): array
+    {
+        $binary=self::ffprobePath();if($binary===null||!self::functionEnabled('proc_open')||!self::isSafeExistingFile($path))return [];
+        $pipes=[];$command=[$binary,'-v','error','-select_streams','v:0','-show_entries','stream=width,height,duration:stream_tags=rotate:stream_side_data=rotation:format=duration,format_name','-of','json',$path];
+        $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__,null,['bypass_shell'=>true]);if(!is_resource($process))return [];
+        fclose($pipes[0]);$json=stream_get_contents($pipes[1],1048576);$error=stream_get_contents($pipes[2],65536);fclose($pipes[1]);fclose($pipes[2]);$exit=proc_close($process);if($exit!==0||!is_string($json))return [];
+        $data=json_decode($json,true);$stream=(array)($data['streams'][0]??[]);$width=(int)($stream['width']??0);$height=(int)($stream['height']??0);$duration=(float)($stream['duration']??($data['format']['duration']??0));$rotation=(int)($stream['tags']['rotate']??0);
+        foreach((array)($stream['side_data_list']??[]) as $side)if(isset($side['rotation'])){$rotation=(int)$side['rotation'];break;}
+        if(abs($rotation)%180===90)[$width,$height]=[$height,$width];$seconds=(int)ceil($duration);if($width<2||$height<2||$seconds<1)return [];
+        return ['width'=>$width,'height'=>$height,'duration'=>$seconds,'rotation'=>$rotation,'format'=>(string)($data['format']['format_name']??'')];
     }
 
     private static function probeMedia(string $path): array
