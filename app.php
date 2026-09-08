@@ -154,7 +154,7 @@ final class App
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_download_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_upload_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("UPDATE media_batches SET pipeline_depth=1 WHERE source_type='telegram_channel' AND pipeline_depth<>1 AND status IN ('queued','running','paused')");
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.3-legacy-job-compat') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.6.0-editable-queues') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
