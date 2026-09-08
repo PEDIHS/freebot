@@ -1,0 +1,31 @@
+name: Apply FreeBot source patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'patches/2.7.0-parallel-media.patch'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate patch
+        run: git apply --check patches/2.7.0-parallel-media.patch
+      - name: Apply patch
+        run: git apply patches/2.7.0-parallel-media.patch
+      - name: Commit source changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add media.php scripts/channel_history_scan.py install.sh update.sh VERSION tests/installer_test.sh
+          git diff --cached --check
+          git commit -m "Release 2.7.0 parallel media workers"
+          git push origin HEAD:main
