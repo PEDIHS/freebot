@@ -19,6 +19,7 @@ final class App
     public static function sendLog(string $message): void{}
     public static function trackChannelPost(array $message,string $source): void{}
     public static function j(mixed $value): string{return json_encode($value,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);}
+    public static function h(mixed $value): string{return htmlspecialchars((string)$value,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
     public static function baseUrl(): string{return 'https://example.test';}
     public static function token(): string{return 'test-token';}
 }
@@ -43,6 +44,7 @@ expect((int)App::one('SELECT COUNT(*) c FROM media_jobs WHERE status=\'queued\''
 
 $claim=new ReflectionMethod(MediaQueue::class,'claimJob');$claim->setAccessible(true);
 $claimScan=new ReflectionMethod(MediaQueue::class,'claimChannelScan');$claimScan->setAccessible(true);
+$failScan=new ReflectionMethod(MediaQueue::class,'failChannelScan');$failScan->setAccessible(true);
 $route=new ReflectionMethod(MediaQueue::class,'destinationForPosition');$route->setAccessible(true);
 $channels=['-10011111','-10022222','-10033333'];
 expect($route->invoke(null,$channels,2000,1)===['channel_id'=>'-10011111','slot'=>1,'sequence'=>1],'first video route must be stable');
@@ -56,6 +58,12 @@ $scanBatchId=(int)App::db()->lastInsertId();$scanClaim=$claimScan->invoke(null,'
 expect(is_array($scanClaim)&&(int)$scanClaim['id']===$scanBatchId,'download worker must claim queued channel scan');
 expect(strlen((string)$scanClaim['scan_lock_token'])===64,'channel scan claim must create a lock token');
 expect($claimScan->invoke(null,'scan-worker-2')===null,'scan lease must prevent duplicate claim');
+App::q("INSERT INTO media_jobs(batch_id,position,source_url,source_host,engine,status,max_attempts,source_chat_id,source_message_id,created_at,updated_at) VALUES (?,1,'tgmtproto://channel/-100999/321','telegram-mtproto','telegram-mtproto','queued',3,'-100999',321,NOW(),NOW())",[$scanBatchId]);
+App::q('UPDATE media_batches SET source_last_message_id=321,source_scanned_items=1,total_items=1 WHERE id=?',[$scanBatchId]);
+expect($failScan->invoke(null,$scanClaim,new RuntimeException('temporary scanner failure'))===true,'interrupted scan must be retryable');
+expect((int)App::one('SELECT COUNT(*) c FROM media_jobs WHERE batch_id=?',[$scanBatchId])['c']===1,'interrupted scan must preserve checkpoint jobs');
+$checkpoint=App::one('SELECT scan_status,source_last_message_id,source_scanned_items FROM media_batches WHERE id=?',[$scanBatchId]);
+expect($checkpoint['scan_status']==='queued'&&(int)$checkpoint['source_last_message_id']===321&&(int)$checkpoint['source_scanned_items']===1,'scan checkpoint must survive interruption');
 App::q("UPDATE media_batches SET scan_status='failed',scan_error='test',scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status='completed_with_errors' WHERE id=?",[$scanBatchId]);
 expect(MediaQueue::retryFailed($scanBatchId)===1,'failed channel scan must be retryable without browser');
 expect(App::one('SELECT scan_status,status FROM media_batches WHERE id=?',[$scanBatchId])['scan_status']==='queued','retry must persist channel scan in queue');
