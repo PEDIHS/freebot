@@ -141,6 +141,7 @@ def self_test() -> None:
     assert validate_transfer_size(1024 * 1024 * 1024) == 1024 * 1024 * 1024
     assert display_dimensions(1920, 1080, 90) == (1080, 1920)
     assert display_dimensions(1920, 1080, 0) == (1920, 1080)
+    assert thumbnail_path_for(Path("/tmp/movie.mp4")).name == "movie.mp4.thumb.jpg"
     print("Channel history scanner self-test passed.")
 
 
@@ -257,6 +258,111 @@ def explicit_video_attributes(path: Path, metadata: dict[str, object]) -> list[o
             supports_streaming=bool(metadata["supports_streaming"]),
         ),
     ]
+
+
+def thumbnail_path_for(video_path: Path) -> Path:
+    return video_path.with_name(video_path.name + ".thumb.jpg")
+
+
+def thumbnail_dimensions(path: Path) -> tuple[int, int]:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return 0, 0
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams") or []
+        if not streams:
+            return 0, 0
+        return int(streams[0].get("width") or 0), int(streams[0].get("height") or 0)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, json.JSONDecodeError):
+        return 0, 0
+
+
+def valid_telegram_thumbnail(path: Path) -> bool:
+    if not path.is_file() or path.suffix.lower() not in {".jpg", ".jpeg"}:
+        return False
+    size = path.stat().st_size
+    if size <= 0 or size > 19_500:
+        return False
+    width, height = thumbnail_dimensions(path)
+    return 1 <= width <= 320 and 1 <= height <= 320
+
+
+def render_telegram_thumbnail(source: Path, target: Path, seek_seconds: float = 0.0) -> Path | None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    attempts = ((320, 7), (280, 9), (240, 11), (200, 13), (160, 15), (128, 17))
+    for side, quality in attempts:
+        temporary = target.with_name(target.name + f".{side}.tmp.jpg")
+        temporary.unlink(missing_ok=True)
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        if seek_seconds > 0:
+            command += ["-ss", f"{seek_seconds:.3f}"]
+        command += [
+            "-i", str(source),
+            "-frames:v", "1",
+            "-vf", f"scale={side}:{side}:force_original_aspect_ratio=decrease",
+            "-q:v", str(quality),
+            "-map_metadata", "-1",
+            str(temporary),
+        ]
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            temporary.unlink(missing_ok=True)
+            continue
+        if result.returncode == 0 and valid_telegram_thumbnail(temporary):
+            os.replace(temporary, target)
+            return target
+        temporary.unlink(missing_ok=True)
+    return None
+
+
+async def preserve_or_generate_thumbnail(client: object, message: object, video_path: Path, metadata: dict[str, object]) -> Path | None:
+    target = thumbnail_path_for(video_path)
+    if valid_telegram_thumbnail(target):
+        return target
+    source_thumb = video_path.with_name(video_path.name + ".source-thumb.jpg")
+    downloaded_thumb: Path | None = None
+    try:
+        video = getattr(message, "video", None)
+        if getattr(video, "thumbs", None):
+            downloaded = await client.download_media(message, file=str(source_thumb), thumb=-1)
+            if downloaded:
+                downloaded_thumb = Path(downloaded)
+                rendered = render_telegram_thumbnail(downloaded_thumb, target)
+                if rendered is not None:
+                    return rendered
+    except Exception as error:
+        print(f"Source thumbnail could not be preserved: {error}", file=sys.stderr, flush=True)
+    finally:
+        for candidate in {source_thumb, downloaded_thumb}:
+            if isinstance(candidate, Path) and candidate != target:
+                candidate.unlink(missing_ok=True)
+    duration = max(1, int(metadata.get("duration") or 1))
+    seek = min(8.0, max(0.5, duration * 0.08))
+    return render_telegram_thumbnail(video_path, target, seek)
+
+
+def ensure_upload_thumbnail(video_path: Path, metadata: dict[str, object]) -> Path:
+    target = thumbnail_path_for(video_path)
+    if valid_telegram_thumbnail(target):
+        return target
+    if target.is_file():
+        preserved = render_telegram_thumbnail(target, target)
+        if preserved is not None:
+            return preserved
+    duration = max(1, int(metadata.get("duration") or 1))
+    seek = min(8.0, max(0.5, duration * 0.08))
+    generated = render_telegram_thumbnail(video_path, target, seek)
+    if generated is None:
+        raise RuntimeError("ساخت Thumbnail استاندارد JPEG برای ویدیو ممکن نشد؛ ارسال بدون پیش‌نمایش متوقف شد.")
+    return generated
 
 
 def friendly_error(error: Exception) -> str:
@@ -424,6 +530,7 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
             attributes = None
             mime_type = None
             supports_streaming = False
+            thumbnail: Path | None = None
             if not effective_force_document:
                 upload_metadata = ffprobe_video_metadata(upload)
                 if not bool(upload_metadata["telegram_video"]):
@@ -432,14 +539,17 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                     attributes = explicit_video_attributes(upload, upload_metadata)
                     mime_type = "video/mp4"
                     supports_streaming = bool(upload_metadata["supports_streaming"])
+                    thumbnail = ensure_upload_thumbnail(upload, upload_metadata)
             message = await client.send_file(
                 entity,
                 str(upload),
                 caption=None,
                 force_document=effective_force_document,
                 supports_streaming=supports_streaming,
+                nosound_video=True if not effective_force_document else None,
                 mime_type=mime_type,
                 attributes=attributes,
+                thumb=str(thumbnail) if thumbnail is not None else None,
                 part_size_kb=512,
                 progress_callback=upload_progress,
             )
@@ -541,11 +651,19 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
             downloaded = await client.download_media(message, file=str(output), progress_callback=progress)
             if not downloaded or not Path(downloaded).is_file():
                 raise RuntimeError("Telethon فایل ویدیو را ایجاد نکرد.")
+            downloaded_path = Path(downloaded)
+            final_metadata = ffprobe_video_metadata(downloaded_path)
+            thumbnail = await preserve_or_generate_thumbnail(client, message, downloaded_path, final_metadata)
+            if thumbnail is None or not valid_telegram_thumbnail(thumbnail):
+                raise RuntimeError("Thumbnail ویدیو از پیام اصلی قابل استخراج نبود و ساخت Thumbnail جایگزین نیز ناموفق بود.")
             return {
                 "ok": True,
                 "type": "downloaded",
-                "path": str(Path(downloaded)),
-                "size": Path(downloaded).stat().st_size,
+                "path": str(downloaded_path),
+                "size": downloaded_path.stat().st_size,
+                "thumbnail_path": str(thumbnail),
+                "thumbnail_size": thumbnail.stat().st_size,
+                "video_metadata": final_metadata,
                 **metadata,
             }
         counts = {"video": 0, "photo": 0, "document": 0, "animation": 0, "audio": 0}

@@ -662,8 +662,12 @@ final class MediaQueue
         if($method==='sendVideo'){
             $meta=self::telegramVideoMetadata($path);
             if($meta===[])throw new MediaQueueException('VIDEO_METADATA','ابعاد و مدت ویدیو با ffprobe قابل تشخیص نیست؛ برای جلوگیری از Preview خراب ارسال متوقف شد.');
+            $thumb=self::telegramVideoThumbnail($path,$meta);
+            if($thumb==='')throw new MediaQueueException('VIDEO_THUMBNAIL','ساخت Thumbnail و Cover ویدیو ممکن نشد؛ ارسال بدون پیش‌نمایش متوقف شد.');
             $data['supports_streaming']='true';$data['width']=(string)$meta['width'];$data['height']=(string)$meta['height'];$data['duration']=(string)$meta['duration'];
-            self::event($jobId,'info','video_metadata','متادیتای واقعی ویدیو برای Telegram ثبت شد.',$meta);
+            $data['thumbnail']='attach://video_thumb';$data['video_thumb']=new CURLFile($thumb,'image/jpeg','thumbnail.jpg');
+            $data['cover']='attach://video_cover';$data['video_cover']=new CURLFile($thumb,'image/jpeg','cover.jpg');
+            self::event($jobId,'info','video_metadata','متادیتا، Thumbnail و Cover واقعی ویدیو برای Telegram ثبت شد.',$meta+['thumbnail_size'=>(int)(filesize($thumb)?:0)]);
         }
         $ch=curl_init('https://api.telegram.org/bot'.App::token().'/'.$method);$last=0.0;$lastProgress=-1;$startedAt=microtime(true);
         curl_setopt_array($ch,[CURLOPT_POST=>true,CURLOPT_POSTFIELDS=>$data,CURLOPT_RETURNTRANSFER=>true,CURLOPT_CONNECTTIMEOUT=>20,CURLOPT_TIMEOUT=>self::uploadTimeout(),CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_HTTPHEADER=>['Accept: application/json'],CURLOPT_NOPROGRESS=>false,CURLOPT_XFERINFOFUNCTION=>static function($ch,float $dt,float $dn,float $total,float $now)use($job,&$last,&$lastProgress,$startedAt):int{$percent=$total>0?(int)min(99,max(72,72+($now/$total)*27)):72;$time=microtime(true);if($percent>=$lastProgress+2||$time-$last>2){$last=$time;$lastProgress=$percent;try{if(!self::updateTransferProgress($job,'upload',(int)$now,(int)$total,$startedAt,72,27))return 1;}catch(Throwable){return 1;}}return 0;}]);
@@ -1107,6 +1111,22 @@ final class MediaQueue
         foreach((array)($stream['side_data_list']??[]) as $side)if(isset($side['rotation'])){$rotation=(int)$side['rotation'];break;}
         if(abs($rotation)%180===90)[$width,$height]=[$height,$width];$seconds=(int)ceil($duration);if($width<2||$height<2||$seconds<1)return [];
         return ['width'=>$width,'height'=>$height,'duration'=>$seconds,'rotation'=>$rotation,'format'=>(string)($data['format']['format_name']??'')];
+    }
+
+    private static function telegramVideoThumbnail(string $path,array $meta=[]): string
+    {
+        $target=$path.'.thumb.jpg';
+        if(self::isSafeExistingFile($target)){clearstatcache(true,$target);$size=(int)(filesize($target)?:0);if($size>0&&$size<=19500)return $target;}
+        $binary=self::ffmpegPath();if($binary===null||!self::functionEnabled('proc_open')||!self::isSafeExistingFile($path))return '';
+        $duration=max(1,(int)($meta['duration']??1));$seek=min(8.0,max(.5,$duration*.08));
+        foreach([[320,7],[280,9],[240,11],[200,13],[160,15],[128,17]] as [$side,$quality]){
+            $tmp=$target.'.'.$side.'.tmp.jpg';@unlink($tmp);$pipes=[];
+            $command=[$binary,'-hide_banner','-loglevel','error','-y','-ss',number_format($seek,3,'.',''),'-i',$path,'-frames:v','1','-vf','scale='.$side.':'.$side.':force_original_aspect_ratio=decrease','-q:v',(string)$quality,'-map_metadata','-1',$tmp];
+            $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__,null,['bypass_shell'=>true]);if(!is_resource($process))continue;
+            fclose($pipes[0]);stream_get_contents($pipes[1],65536);stream_get_contents($pipes[2],65536);fclose($pipes[1]);fclose($pipes[2]);$exit=proc_close($process);clearstatcache(true,$tmp);
+            $size=is_file($tmp)?(int)(filesize($tmp)?:0):0;if($exit===0&&$size>0&&$size<=19500){@rename($tmp,$target);@chmod($target,0640);return self::isSafeExistingFile($target)?$target:'';}@unlink($tmp);
+        }
+        return '';
     }
 
     private static function probeMedia(string $path): array
