@@ -155,7 +155,7 @@ final class App
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_upload_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             if (version_compare($schemaVersion, '2.8.0-queue-state', '<')) {
                 $pdo->exec("ALTER TABLE media_batches MODIFY pipeline_depth tinyint unsigned NOT NULL DEFAULT 1");
-                $pdo->exec("UPDATE media_batches SET pipeline_depth=4 WHERE source_type='telegram_channel' AND pipeline_depth<4 AND status IN ('queued','running','paused')");
+                $pdo->exec("UPDATE media_batches SET pipeline_depth=4 WHERE source_type='telegram_channel' AND pipeline_depth<4");
                 $pdo->exec("UPDATE media_batches SET status=CASE WHEN scan_status='scanning' THEN 'running' ELSE 'queued' END,completed_at=NULL WHERE source_type='telegram_channel' AND scan_status IN ('queued','scanning') AND status='completed'");
                 $pdo->exec("UPDATE media_batches SET status='queued',scan_status='queued',scan_attempts=0,scan_next_attempt_at=NOW(),scan_error='صف 0/0 قدیمی شناسایی شد؛ اسکن کامل با منطق جدید دوباره اجرا می‌شود.',scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,source_last_message_id=0,source_scanned_items=0,source_skipped_items=0,completed_at=NULL WHERE source_type='telegram_channel' AND status='completed' AND total_items=0 AND ((scan_attempts=0 AND source_last_message_id=0) OR (source_video_count>0 AND source_skipped_items<source_video_count))");
                 $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.8.0-queue-state') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
