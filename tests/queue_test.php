@@ -106,6 +106,12 @@ App::q("UPDATE media_batches SET source_type='telegram_channel',source_channel_i
 App::q("UPDATE media_jobs SET status='completed',source_chat_id='-100996',source_message_id=777,target_channel_id='-100123',telegram_message_id=9001 WHERE batch_id=?",[$skipBatch]);
 expect($alreadyDelivered->invoke(null,1,'-100996',777,$skipBatch+1000,['-100123'])===true,'only a successfully uploaded video to a current destination may be skipped');
 expect($alreadyDelivered->invoke(null,1,'-100996',777,$skipBatch+1000,['-100456'])===false,'a new destination must not inherit the old destination dedupe state');
+// Production can expose native prepared parameters as binary while legacy
+// channel columns use utf8mb4_bin / utf8mb4_unicode_ci. Reproduce that exact
+// class of MariaDB 1270 failure and ensure destination dedupe remains safe.
+$pdo->exec("SET NAMES binary");
+expect($alreadyDelivered->invoke(null,1,'-100996',777,$skipBatch+1000,['-100123','-100456'])===true,'multi-destination dedupe must be safe with binary prepared parameters');
+$pdo->exec("SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci");
 App::q("UPDATE media_jobs SET status='failed',telegram_message_id=NULL WHERE batch_id=?",[$skipBatch]);
 expect($alreadyDelivered->invoke(null,1,'-100996',777,$skipBatch+1000,['-100123'])===false,'failed or cancelled historical jobs must never suppress a new queue');
 MediaQueue::cancelBatch($skipBatch);

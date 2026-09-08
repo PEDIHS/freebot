@@ -122,9 +122,12 @@ final class MediaQueue
     {
         $destinations=array_values(array_unique(array_filter(array_map(static fn($value):string=>trim((string)$value),$destinations),static fn(string $value):bool=>$value!=='')));
         if($destinations===[])return false;
-        $marks=implode(',',array_fill(0,count($destinations),'?'));
-        $params=[$productId,$chatId,$messageId,$batchId,...$destinations];
-        $sql="SELECT 1 FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE b.product_id=? AND j.source_chat_id=? AND j.source_message_id=? AND b.id<>? AND j.status='completed' AND j.telegram_message_id IS NOT NULL AND COALESCE(NULLIF(j.target_channel_id,''),b.channel_id) IN ({$marks}) LIMIT 1";
+        // Do not COALESCE target_channel_id with batch.channel_id in SQL: old
+        // databases may keep these columns under different collations and native
+        // prepared parameters can arrive as binary, which makes MariaDB raise 1270.
+        $marks=implode(',',array_fill(0,count($destinations),'CAST(? AS BINARY)'));
+        $params=[$productId,$chatId,$messageId,$batchId,...$destinations,...$destinations];
+        $sql="SELECT 1 FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE b.product_id=? AND j.source_chat_id=? AND j.source_message_id=? AND b.id<>? AND j.status='completed' AND j.telegram_message_id IS NOT NULL AND ((COALESCE(OCTET_LENGTH(j.target_channel_id),0)>0 AND CAST(j.target_channel_id AS BINARY) IN ({$marks})) OR (COALESCE(OCTET_LENGTH(j.target_channel_id),0)=0 AND CAST(b.channel_id AS BINARY) IN ({$marks}))) LIMIT 1";
         return App::one($sql,$params)!==null;
     }
 
@@ -288,7 +291,7 @@ final class MediaQueue
         $status=$role==='download'?'queued':'downloaded';$lease=self::lockSeconds();
         $orderGuard=$role==='download'
             ?"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<=GREATEST(CAST(j.position AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled')))"
-            :"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND CAST(CASE WHEN OCTET_LENGTH(previous_job.target_channel_id)>0 THEN previous_job.target_channel_id ELSE b.channel_id END AS BINARY)=CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) AND previous_job.status NOT IN ('completed','failed','cancelled') AND IF(b.source_type='telegram_channel',COALESCE(previous_job.target_sequence,previous_job.position)<=GREATEST(CAST(COALESCE(j.target_sequence,j.position) AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0),previous_job.position<j.position)))";
+            :"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND ((COALESCE(OCTET_LENGTH(previous_job.target_channel_id),0)>0 AND COALESCE(OCTET_LENGTH(j.target_channel_id),0)>0 AND CAST(previous_job.target_channel_id AS BINARY)=CAST(j.target_channel_id AS BINARY)) OR (COALESCE(OCTET_LENGTH(previous_job.target_channel_id),0)>0 AND COALESCE(OCTET_LENGTH(j.target_channel_id),0)=0 AND CAST(previous_job.target_channel_id AS BINARY)=CAST(b.channel_id AS BINARY)) OR (COALESCE(OCTET_LENGTH(previous_job.target_channel_id),0)=0 AND COALESCE(OCTET_LENGTH(j.target_channel_id),0)>0 AND CAST(b.channel_id AS BINARY)=CAST(j.target_channel_id AS BINARY)) OR (COALESCE(OCTET_LENGTH(previous_job.target_channel_id),0)=0 AND COALESCE(OCTET_LENGTH(j.target_channel_id),0)=0)) AND previous_job.status NOT IN ('completed','failed','cancelled') AND IF(b.source_type='telegram_channel',COALESCE(previous_job.target_sequence,previous_job.position)<=GREATEST(CAST(COALESCE(j.target_sequence,j.position) AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0),previous_job.position<j.position)))";
         $claimLock=$role==='download'?'freebot-download-admission':'';$claimLocked=true;
         if($claimLock!=='')$claimLocked=(int)(App::one('SELECT GET_LOCK(?,2) acquired',[$claimLock])['acquired']??0)===1;
         if(!$claimLocked)return null;
@@ -310,7 +313,9 @@ final class MediaQueue
                 if($claimed!==1)continue;
                 App::q("UPDATE media_batches b JOIN media_jobs j ON j.batch_id=b.id SET b.status='running',b.current_item_id=j.id,b.started_at=COALESCE(b.started_at,NOW()),b.updated_at=NOW() WHERE j.id=?",[$candidate['id']]);
                 self::heartbeatWorker($workerId,'busy',(int)$candidate['id']);
-                return App::one("SELECT j.*,b.product_id,b.channel_id,b.upload_mode,b.total_items,b.sequential_mode,b.pipeline_depth,b.status batch_status,b.title batch_title,CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END effective_channel_id,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id WHERE j.id=?",[$candidate['id']]);
+                $row=App::one("SELECT j.*,b.product_id,b.channel_id,b.upload_mode,b.total_items,b.sequential_mode,b.pipeline_depth,b.status batch_status,b.title batch_title,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id WHERE j.id=?",[$candidate['id']]);
+                if($row!==null)$row['effective_channel_id']=trim((string)($row['target_channel_id']??''))!==''?(string)$row['target_channel_id']:(string)$row['channel_id'];
+                return $row;
             }
             return null;
         }finally{if($claimLock!=='')try{App::q('SELECT RELEASE_LOCK(?)',[$claimLock]);}catch(Throwable){}}
@@ -1011,10 +1016,19 @@ final class MediaQueue
 
     public static function batchDestinationStats(int $batchId): array
     {
-        return App::all("SELECT MAX(CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY)) channel_id,MIN(COALESCE(j.target_slot,1)) target_slot,COUNT(*) total,SUM(j.status='completed') completed,SUM(j.status='failed') failed,SUM(j.status='cancelled') cancelled,SUM(j.status NOT IN ('completed','failed','cancelled')) pending,COALESCE(SUM(j.total_bytes),0) total_bytes FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.batch_id=? GROUP BY CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) ORDER BY target_slot",[$batchId]);
+        // target_slot is numeric and stable, so group by it and resolve the
+        // display channel in PHP instead of mixing differently-collated strings.
+        $rows=App::all("SELECT MAX(j.target_channel_id) job_channel_id,MAX(b.channel_id) batch_channel_id,COALESCE(j.target_slot,1) target_slot,COUNT(*) total,SUM(j.status='completed') completed,SUM(j.status='failed') failed,SUM(j.status='cancelled') cancelled,SUM(j.status NOT IN ('completed','failed','cancelled')) pending,COALESCE(SUM(j.total_bytes),0) total_bytes FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id WHERE j.batch_id=? GROUP BY COALESCE(j.target_slot,1) ORDER BY target_slot",[$batchId]);
+        foreach($rows as &$row){$target=trim((string)($row['job_channel_id']??''));$row['channel_id']=$target!==''?$target:(string)($row['batch_channel_id']??'');unset($row['job_channel_id'],$row['batch_channel_id']);}unset($row);
+        return $rows;
     }
 
-    public static function recentJobs(int $limit=100): array{return App::all("SELECT j.*,b.title batch_title,b.channel_id,CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END effective_channel_id,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id ORDER BY CASE j.status WHEN 'downloading' THEN 0 WHEN 'uploading' THEN 1 WHEN 'downloaded' THEN 2 WHEN 'queued' THEN 3 WHEN 'failed' THEN 4 WHEN 'cancelled' THEN 5 ELSE 6 END,CASE WHEN j.status IN ('downloading','uploading') THEN j.updated_at END DESC,j.id DESC LIMIT ".max(1,min(500,$limit)));}
+    public static function recentJobs(int $limit=100): array
+    {
+        $rows=App::all("SELECT j.*,b.title batch_title,b.channel_id,p.title product_title FROM media_jobs j JOIN media_batches b ON b.id=j.batch_id LEFT JOIN products p ON p.id=b.product_id ORDER BY CASE j.status WHEN 'downloading' THEN 0 WHEN 'uploading' THEN 1 WHEN 'downloaded' THEN 2 WHEN 'queued' THEN 3 WHEN 'failed' THEN 4 WHEN 'cancelled' THEN 5 ELSE 6 END,CASE WHEN j.status IN ('downloading','uploading') THEN j.updated_at END DESC,j.id DESC LIMIT ".max(1,min(500,$limit)));
+        foreach($rows as &$row)$row['effective_channel_id']=trim((string)($row['target_channel_id']??''))!==''?(string)$row['target_channel_id']:(string)$row['channel_id'];unset($row);
+        return $rows;
+    }
     public static function jobEvents(int $jobId,int $limit=100): array{return App::all('SELECT * FROM media_job_events WHERE job_id=? ORDER BY id DESC LIMIT '.max(1,min(500,$limit)),[$jobId]);}
 
     public static function statusLabel(string $status): string
