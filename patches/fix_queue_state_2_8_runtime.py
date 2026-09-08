@@ -13,12 +13,6 @@ def replace_once(text,old,new,label):
         raise SystemExit(f'{label}: expected 1 match, got {count}')
     return text.replace(old,new,1)
 
-def replace_exact(text,old,new,expected,label):
-    count=text.count(old)
-    if count!=expected:
-        raise SystemExit(f'{label}: expected {expected} matches, got {count}')
-    return text.replace(old,new)
-
 # Run the heavy queue-state repair exactly once. Keep the generic schema at
 # pipeline 1; Telegram queues explicitly use 4-8 and active Telegram queues
 # are upgraded to at least 4 by this migration.
@@ -36,12 +30,17 @@ new='''            if (version_compare($schemaVersion, '2.8.0-queue-state', '<')
                 $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.8.0-queue-state') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
             }'''
 app=replace_once(app,old,new,'one-time schema migration')
-app=replace_exact(
+app=replace_once(
     app,
-    'pipeline_depth tinyint unsigned NOT NULL DEFAULT 4',
-    'pipeline_depth tinyint unsigned NOT NULL DEFAULT 1',
-    2,
-    'generic pipeline defaults',
+    '            pipeline_depth tinyint unsigned NOT NULL DEFAULT 4,',
+    '            pipeline_depth tinyint unsigned NOT NULL DEFAULT 1,',
+    'media_batches create default',
+)
+app=replace_once(
+    app,
+    "            'pipeline_depth'=>\"tinyint unsigned NOT NULL DEFAULT 4\",",
+    "            'pipeline_depth'=>\"tinyint unsigned NOT NULL DEFAULT 1\",",
+    'media_batches missing-column default',
 )
 p.write_text(app,encoding='utf-8')
 
