@@ -37,7 +37,7 @@ if ! apt-cache show php8.3-fpm >/dev/null 2>&1; then add-apt-repository -y ppa:o
 apt-get install -y php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-gd php8.3-intl php8.3-opcache
 
 if [[ ! -x /opt/freebot-tools/bin/yt-dlp ]]; then python3 -m venv /opt/freebot-tools; fi
-/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade yt-dlp 'Telethon>=1.36,<2'
+/opt/freebot-tools/bin/pip install --disable-pip-version-check --upgrade yt-dlp 'Telethon>=1.36,<2' 'cryptg>=0.4,<1'
 ln -sfn /opt/freebot-tools/bin/yt-dlp /usr/local/bin/yt-dlp
 
 if [[ -e "$INSTALL_DIR" && ! -d "$INSTALL_DIR/.git" ]]; then echo "$INSTALL_DIR exists but is not a FreeBot git checkout. Run reset-install.sh first." >&2; exit 1; fi
