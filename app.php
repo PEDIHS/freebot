@@ -154,7 +154,7 @@ final class App
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_download_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_upload_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("UPDATE media_batches SET pipeline_depth=1 WHERE source_type='telegram_channel' AND pipeline_depth<>1 AND status IN ('queued','running','paused')");
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.1-resumable-checkpoints') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.2-telegram-inventory') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -223,6 +223,7 @@ final class App
             source_channel_title varchar(255) NULL,
             source_last_message_id bigint unsigned NOT NULL DEFAULT 0,
             source_scanned_items bigint unsigned NOT NULL DEFAULT 0,
+            source_video_count bigint unsigned NOT NULL DEFAULT 0,
             sequential_mode tinyint(1) NOT NULL DEFAULT 0,
             pipeline_depth tinyint unsigned NOT NULL DEFAULT 1,
             distribution_mode varchar(20) NOT NULL DEFAULT 'single',
@@ -267,6 +268,7 @@ final class App
             'source_channel_title'=>"varchar(255) NULL",
             'source_last_message_id'=>"bigint unsigned NOT NULL DEFAULT 0",
             'source_scanned_items'=>"bigint unsigned NOT NULL DEFAULT 0",
+            'source_video_count'=>"bigint unsigned NOT NULL DEFAULT 0",
             'sequential_mode'=>"tinyint(1) NOT NULL DEFAULT 0",
             'pipeline_depth'=>"tinyint unsigned NOT NULL DEFAULT 1",
             'distribution_mode'=>"varchar(20) NOT NULL DEFAULT 'single'",
@@ -520,7 +522,7 @@ final class App
             CONSTRAINT fk_invite_event_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
             CONSTRAINT fk_invite_event_order FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        foreach (['downloader_max_mb'=>'1024','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100','channel_history_scan_timeout'=>'7200','telegram_mtproto_upload'=>'1','media_download_timeout'=>'21600','media_upload_timeout'=>'21600'] as $key=>$value) {
+        foreach (['downloader_max_mb'=>'1024','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100','channel_history_scan_timeout'=>'7200','telegram_mtproto_upload'=>'1','media_download_timeout'=>'21600','media_upload_timeout'=>'21600','media_scan_lease_seconds'=>'600'] as $key=>$value) {
             $st=$pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=IF(TRIM(`value`)='',VALUES(`value`),`value`)");
             $st->execute([$key,$value]);
         }

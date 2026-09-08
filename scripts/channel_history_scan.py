@@ -342,10 +342,39 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                 "size": size,
             }
         if args.list_videos:
+            from telethon.tl.types import InputMessagesFilterVideo
+
             total_messages = 0
             video_count = 0
             last_message_id = max(0, int(args.min_message_id))
-            async for message in client.iter_messages(entity, reverse=True, min_id=last_message_id):
+            # Ask Telegram for the exact video count before streaming the list.
+            # The PHP worker persists this inventory first and does not release
+            # download jobs until every video link has been checkpointed.
+            full_inventory = await client.get_messages(
+                entity,
+                limit=0,
+                filter=InputMessagesFilterVideo,
+            )
+            remaining_inventory = await client.get_messages(
+                entity,
+                limit=0,
+                min_id=last_message_id,
+                filter=InputMessagesFilterVideo,
+            )
+            emit_json({
+                "type": "inventory",
+                "channel_id": str(utils_get_peer_id(entity)),
+                "channel_title": str(getattr(entity, "title", "") or ""),
+                "video_count_total": int(getattr(full_inventory, "total", 0) or 0),
+                "video_count_remaining": int(getattr(remaining_inventory, "total", 0) or 0),
+                "checkpoint_message_id": last_message_id,
+            })
+            async for message in client.iter_messages(
+                entity,
+                reverse=True,
+                min_id=last_message_id,
+                filter=InputMessagesFilterVideo,
+            ):
                 total_messages += 1
                 last_message_id = max(last_message_id, int(getattr(message, "id", 0) or 0))
                 if getattr(message, "video", None) is None:
@@ -367,6 +396,8 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
                 "last_message_id": last_message_id,
                 "message_count": total_messages,
                 "video_count": video_count,
+                "video_count_total": int(getattr(full_inventory, "total", 0) or 0),
+                "video_count_remaining": int(getattr(remaining_inventory, "total", 0) or 0),
             }
         if args.download_message:
             if args.message_id <= 0:

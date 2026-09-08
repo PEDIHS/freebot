@@ -154,13 +154,14 @@ final class MediaQueue
     private static function claimChannelScan(string $workerId): ?array
     {
         self::registerWorker($workerId,'download');
+        $leaseSeconds=self::scanLeaseSeconds();
         $claimLock='freebot-channel-scan-claim';$locked=(int)(App::one('SELECT GET_LOCK(?,1) acquired',[$claimLock])['acquired']??0)===1;if(!$locked)return null;
         try{
             for($attempt=0;$attempt<10;$attempt++){
                 $candidate=App::one("SELECT b.id FROM media_batches b WHERE b.source_type='telegram_channel' AND b.scan_status IN ('queued','scanning') AND b.status IN ('queued','running') AND b.scan_attempts<b.scan_max_attempts AND (b.scan_next_attempt_at IS NULL OR b.scan_next_attempt_at<=NOW()) AND (b.scan_status='queued' OR b.scan_lock_expires_at IS NULL OR b.scan_lock_expires_at<NOW()) AND NOT EXISTS (SELECT 1 FROM media_batches active_scan WHERE active_scan.scan_status='scanning' AND active_scan.scan_lock_expires_at>=NOW()) ORDER BY b.id LIMIT 1");
                 if(!$candidate)return null;
                 $token=bin2hex(random_bytes(32));
-                $claimed=App::q("UPDATE media_batches SET scan_status='scanning',scan_attempts=scan_attempts+1,scan_locked_by=?,scan_lock_token=?,scan_lock_expires_at=DATE_ADD(NOW(),INTERVAL 120 SECOND),scan_heartbeat_at=NOW(),scan_next_attempt_at=NULL,scan_error=NULL,status='running',started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE id=? AND source_type='telegram_channel' AND scan_attempts<scan_max_attempts AND (scan_status='queued' OR scan_lock_expires_at IS NULL OR scan_lock_expires_at<NOW())",[$workerId,$token,$candidate['id']])->rowCount();
+                $claimed=App::q("UPDATE media_batches SET scan_status='scanning',scan_attempts=scan_attempts+1,scan_locked_by=?,scan_lock_token=?,scan_lock_expires_at=DATE_ADD(NOW(),INTERVAL {$leaseSeconds} SECOND),scan_heartbeat_at=NOW(),scan_next_attempt_at=NULL,scan_error=NULL,status='running',started_at=COALESCE(started_at,NOW()),updated_at=NOW() WHERE id=? AND source_type='telegram_channel' AND scan_attempts<scan_max_attempts AND (scan_status='queued' OR scan_lock_expires_at IS NULL OR scan_lock_expires_at<NOW())",[$workerId,$token,$candidate['id']])->rowCount();
                 if($claimed!==1)continue;
                 self::heartbeatWorker($workerId,'busy');
                 return App::one('SELECT * FROM media_batches WHERE id=?',[$candidate['id']]);
@@ -175,10 +176,11 @@ final class MediaQueue
         $destinations=json_decode((string)($batch['destination_channels_json']??''),true);if(!is_array($destinations)||$destinations===[])$destinations=[(string)$batch['channel_id']];$destinations=array_values(array_map('strval',$destinations));
         $options=json_decode((string)($batch['scan_options_json']??''),true);if(!is_array($options))$options=[];$skipExisting=(bool)($options['skip_existing']??true);
         $distribution=(string)$batch['distribution_mode'];$destinationLimit=$distribution==='chunked'?max(1,(int)$batch['destination_limit']):PHP_INT_MAX;$maxAttempts=max(1,(int)$batch['scan_max_attempts']);
-        $position=(int)(App::one('SELECT COUNT(*) c FROM media_jobs WHERE batch_id=?',[$batchId])['c']??0);$skipped=0;$checkpoint=max(0,(int)($batch['source_last_message_id']??0));
-        $heartbeat=static function()use($batchId,$token,$workerId):bool{
-            $updated=App::q("UPDATE media_batches SET scan_heartbeat_at=NOW(),scan_lock_expires_at=DATE_ADD(NOW(),INTERVAL 120 SECOND),updated_at=NOW() WHERE id=? AND scan_lock_token=? AND scan_status='scanning' AND status='running'",[$batchId,$token])->rowCount();
-            self::heartbeatWorker($workerId,'busy');return $updated===1;
+        $position=(int)(App::one('SELECT COUNT(*) c FROM media_jobs WHERE batch_id=?',[$batchId])['c']??0);$skipped=0;$checkpoint=max(0,(int)($batch['source_last_message_id']??0));$detected=max($position,(int)($batch['source_video_count']??0));$leaseSeconds=self::scanLeaseSeconds();
+        $heartbeat=static function()use($batchId,$token,$workerId,$leaseSeconds):bool{
+            App::q("UPDATE media_batches SET scan_heartbeat_at=NOW(),scan_lock_expires_at=DATE_ADD(NOW(),INTERVAL {$leaseSeconds} SECOND),updated_at=NOW() WHERE id=? AND scan_lock_token=? AND scan_status='scanning' AND status='running'",[$batchId,$token]);
+            self::heartbeatWorker($workerId,'busy');
+            return App::one("SELECT 1 ok FROM media_batches WHERE id=? AND scan_lock_token=? AND scan_status='scanning' AND status='running' LIMIT 1",[$batchId,$token])!==null;
         };
         $summary=self::streamTelegramVideoList((string)$batch['source_channel_id'],static function(array $item)use($productId,$batchId,$maxAttempts,$skipExisting,$destinations,$destinationLimit,$distribution,&$position,&$skipped,&$checkpoint):void{
             $chatId=trim((string)($item['source_chat_id']??''));$messageId=max(0,(int)($item['message_id']??0));if($chatId===''||$messageId<=0)return;
@@ -187,10 +189,15 @@ final class MediaQueue
             $position++;$route=self::destinationForPosition($destinations,$destinationLimit,$position);if($route===null)throw new RuntimeException('تعداد ویدیوها از ظرفیت مقصدها بیشتر است. ظرفیت فعلی: '.number_format(count($destinations)*$destinationLimit).' ویدیو. سقف هر کانال یا تعداد مقصدها را افزایش دهید.');
             $source='tgmtproto://channel/'.$chatId.'/'.$messageId;$fileName=self::sanitizeFileName((string)($item['file_name']??('telegram-'.$messageId.'.mp4')));if(pathinfo($fileName,PATHINFO_EXTENSION)==='')$fileName.='.mp4';
             $pdo=App::db();$pdo->beginTransaction();try{App::q("INSERT INTO media_jobs(batch_id,position,source_url,source_host,detected_title,engine,status,max_attempts,total_bytes,file_name,mime_type,source_chat_id,source_message_id,source_date,target_channel_id,target_slot,target_sequence,created_at,updated_at) VALUES (?,?,?,?,?,'telegram-mtproto','queued',?,?,?,?,?,?,?,?,?,?,NOW(),NOW())",[$batchId,$position,$source,'telegram-mtproto',mb_substr((string)($item['title']??pathinfo($fileName,PATHINFO_FILENAME)),0,500),$maxAttempts,max(0,(int)($item['file_size']??0)),$fileName,mb_substr((string)($item['mime_type']??'video/mp4'),0,120),$chatId,$messageId,trim((string)($item['date']??''))?:null,$route['channel_id'],$route['slot'],$route['sequence']]);$checkpoint=max($checkpoint,$messageId);App::q('UPDATE media_batches SET source_last_message_id=GREATEST(source_last_message_id,?),source_scanned_items=?,total_items=?,updated_at=NOW() WHERE id=?',[$checkpoint,$position,$position,$batchId]);$pdo->commit();}catch(Throwable $e){if($pdo->inTransaction())$pdo->rollBack();$position--;throw $e;}
-        },$heartbeat,$checkpoint);
+        },$heartbeat,$checkpoint,static function(array $inventory)use($batchId,$token,$position,&$detected):void{
+            $detected=max($position,max(0,(int)($inventory['video_count_total']??0)));
+            App::q("UPDATE media_batches SET source_channel_id=COALESCE(NULLIF(?,''),source_channel_id),source_channel_title=COALESCE(NULLIF(?,''),source_channel_title),source_video_count=?,scan_heartbeat_at=NOW(),updated_at=NOW() WHERE id=? AND scan_lock_token=? AND scan_status='scanning'",[(string)($inventory['channel_id']??''),mb_substr((string)($inventory['channel_title']??''),0,255),$detected,$batchId,$token]);
+            if(App::one("SELECT 1 ok FROM media_batches WHERE id=? AND scan_lock_token=? AND scan_status='scanning' LIMIT 1",[$batchId,$token])===null)throw new MediaQueueException('LEASE_LOST','قفل اسکن هنگام ثبت آمار اولیه از دست رفت.');
+        });
         if(!$heartbeat())throw new MediaQueueException('SCAN_CANCELLED','اسکن توسط مدیر متوقف یا قفل آن منتقل شد.');
         $channelTitle=mb_substr((string)($summary['channel_title']??''),0,255);$scanned=$position;$lastId=max($checkpoint,(int)($summary['last_message_id']??0));
-        $updated=App::q("UPDATE media_batches SET source_channel_id=?,source_channel_title=?,source_last_message_id=?,source_scanned_items=?,total_items=?,scan_status='completed',scan_error=NULL,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status=?,completed_at=?,updated_at=NOW() WHERE id=? AND scan_lock_token=?",[(string)($summary['channel_id']??$batch['source_channel_id']),$channelTitle?:null,$lastId,$scanned,$position,$position>0?'queued':'completed',$position>0?null:date('Y-m-d H:i:s'),$batchId,$token])->rowCount();
+        $detected=max($detected,(int)($summary['video_count_total']??0),$position);
+        $updated=App::q("UPDATE media_batches SET source_channel_id=?,source_channel_title=?,source_last_message_id=?,source_scanned_items=?,source_video_count=?,total_items=?,scan_status='completed',scan_error=NULL,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status=?,completed_at=?,updated_at=NOW() WHERE id=? AND scan_lock_token=?",[(string)($summary['channel_id']??$batch['source_channel_id']),$channelTitle?:null,$lastId,$scanned,$detected,$position,$position>0?'queued':'completed',$position>0?null:date('Y-m-d H:i:s'),$batchId,$token])->rowCount();
         if($updated!==1)throw new MediaQueueException('LEASE_LOST','قفل اسکن کانال از این Worker گرفته شد.');
         App::logEvent('telegram_channel_imported','کانال مبدأ در Worker اسکن و صف انتقال ساخته شد.',['batch_id'=>$batchId,'product_id'=>$productId,'videos'=>$scanned,'queued'=>$position,'skipped'=>$skipped]);
     }
@@ -200,7 +207,12 @@ final class MediaQueue
         $batchId=(int)$batch['id'];$fresh=App::one('SELECT status,scan_status,scan_attempts,scan_max_attempts,scan_lock_token FROM media_batches WHERE id=?',[$batchId]);if(!$fresh)return false;
         if((string)$fresh['status']==='cancelled'||(string)$fresh['scan_status']==='cancelled')return false;
         $message=self::cleanError($e->getMessage());$code=$e instanceof MediaQueueException?$e->errorCode:'UNEXPECTED';
-        if($code==='SCAN_CANCELLED'){App::q("UPDATE media_batches SET scan_status='queued',scan_next_attempt_at=NOW(),scan_error=?,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status=IF(status='paused','paused','queued'),updated_at=NOW() WHERE id=?",[$message,$batchId]);return true;}
+        $claimedToken=(string)($batch['scan_lock_token']??'');$freshToken=(string)($fresh['scan_lock_token']??'');
+        if($freshToken!==''&&!hash_equals($freshToken,$claimedToken))return true;
+        if(in_array($code,['SCAN_CANCELLED','LEASE_LOST'],true)){
+            App::q("UPDATE media_batches SET scan_status='queued',scan_attempts=IF(scan_attempts>0,scan_attempts-1,0),scan_next_attempt_at=NOW(),scan_error=?,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status=IF(status='paused','paused','queued'),updated_at=NOW() WHERE id=? AND (scan_lock_token=? OR scan_lock_token IS NULL)",[$message,$batchId,$claimedToken]);
+            return true;
+        }
         $retry=(int)$fresh['scan_attempts']<(int)$fresh['scan_max_attempts'];
         if((string)$fresh['status']==='paused'){$retry=true;App::q("UPDATE media_batches SET scan_status='queued',scan_next_attempt_at=NOW(),scan_error=?,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,updated_at=NOW() WHERE id=?",[$message,$batchId]);}
         elseif($retry){$delay=min(900,15*(2**max(0,(int)$fresh['scan_attempts']-1)));App::q("UPDATE media_batches SET scan_status='queued',scan_next_attempt_at=DATE_ADD(NOW(),INTERVAL {$delay} SECOND),scan_error=?,scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status='queued',updated_at=NOW() WHERE id=?",[$message,$batchId]);}
@@ -281,6 +293,7 @@ final class MediaQueue
     }
 
     private static function lockSeconds(): int{return max(60,min(900,(int)App::setting('media_lock_seconds','180')));}
+    private static function scanLeaseSeconds(): int{return max(180,min(1800,(int)App::setting('media_scan_lease_seconds','600')));}
 
     private static function registerWorker(string $workerId,string $role): void
     {
@@ -320,7 +333,8 @@ final class MediaQueue
     public static function maintenance(): void
     {
         self::cleanupStorage();self::recoverStaleJobs();
-        App::q("UPDATE media_batches SET scan_status='failed',scan_error=COALESCE(scan_error,'Worker اسکن قبل از پایان قطع شد و تعداد Retryها تمام شده است.'),scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status='completed_with_errors',completed_at=NOW(),updated_at=NOW() WHERE source_type='telegram_channel' AND scan_status='scanning' AND scan_attempts>=scan_max_attempts AND scan_lock_expires_at<NOW()");
+        App::q("UPDATE media_batches SET scan_status='queued',scan_attempts=IF(scan_attempts>0,scan_attempts-1,0),scan_next_attempt_at=NOW(),scan_error='Worker اسکن قطع شد؛ ادامه خودکار از آخرین Checkpoint زمان‌بندی شد.',scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status=IF(status='paused','paused','queued'),updated_at=NOW() WHERE source_type='telegram_channel' AND scan_status='scanning' AND scan_lock_expires_at<NOW() AND status<>'cancelled'");
+        App::q("UPDATE media_batches SET scan_attempts=IF(scan_max_attempts>0,scan_max_attempts-1,0),scan_next_attempt_at=NOW(),scan_error='صف گیرکرده قدیمی بازیابی شد؛ ادامه خودکار از آخرین Checkpoint انجام می‌شود.',status='queued',updated_at=NOW() WHERE source_type='telegram_channel' AND scan_status='queued' AND status='queued' AND scan_attempts>=scan_max_attempts");
         App::q("UPDATE media_workers SET status='stopped',current_job_id=NULL,updated_at=NOW() WHERE status NOT IN ('stopped','stopping') AND heartbeat_at<DATE_SUB(NOW(),INTERVAL 5 MINUTE)");
     }
 
@@ -714,7 +728,7 @@ final class MediaQueue
         $path=$dir.'/capture-'.$kind.'-'.bin2hex(random_bytes(16)).'.log';$handle=@fopen($path,'x');if($handle===false)throw new RuntimeException('ساخت فایل امن خروجی Telethon ممکن نشد.');@chmod($path,0600);fclose($handle);return $path;
     }
 
-    private static function streamTelegramVideoList(string $sourceChannel,callable $onVideo,?callable $heartbeat=null,int $minMessageId=0): array
+    private static function streamTelegramVideoList(string $sourceChannel,callable $onVideo,?callable $heartbeat=null,int $minMessageId=0,?callable $onInventory=null): array
     {
         $runtime=self::scannerRuntime();$scanner=self::historyScannerStatus();
         if(!is_executable($runtime['python'])||!is_file($runtime['script']))throw new RuntimeException('موتور Telethon نصب نیست؛ ابتدا update.sh را اجرا کنید.');
@@ -731,12 +745,12 @@ final class MediaQueue
             $descriptors=[0=>['file',$inputFile!==''?$inputFile:'/dev/null','r'],1=>['file','/dev/null','a'],2=>['file',$stderrFile,'a']];$pipes=[];
             $process=proc_open($command,$descriptors,$pipes,null,null,['bypass_shell'=>true]);if(!is_resource($process))throw new RuntimeException('اجرای مستقل موتور Telethon ممکن نشد.');
             $exitCode=0;$lastHeartbeat=0.0;$reader=null;$readBuffer='';$summary=null;$delivered=[];
-            $consume=static function(bool $final=false)use(&$reader,&$readBuffer,&$summary,&$delivered,$resultFile,$onVideo):void{
+            $consume=static function(bool $final=false)use(&$reader,&$readBuffer,&$summary,&$delivered,$resultFile,$onVideo,$onInventory):void{
                 if($reader===null&&is_file($resultFile)){$opened=@fopen($resultFile,'rb');if(is_resource($opened))$reader=$opened;}
                 if(!is_resource($reader))return;
                 $chunk=stream_get_contents($reader);if(is_string($chunk)&&$chunk!=='')$readBuffer.=$chunk;
                 $lines=[];while(($newline=strpos($readBuffer,"\n"))!==false){$lines[]=substr($readBuffer,0,$newline);$readBuffer=substr($readBuffer,$newline+1);}if($final&&trim($readBuffer)!==''){$lines[]=$readBuffer;$readBuffer='';}
-                foreach($lines as $line){$decoded=json_decode(trim($line),true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(!is_array($decoded))continue;if(($decoded['type']??'')==='video'){$key=(string)($decoded['source_chat_id']??'').':'.(string)($decoded['message_id']??'');if(isset($delivered[$key]))continue;$delivered[$key]=true;$onVideo($decoded);}elseif(($decoded['type']??'')!=='progress')$summary=$decoded;}
+                foreach($lines as $line){$decoded=json_decode(trim($line),true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(!is_array($decoded))continue;$type=(string)($decoded['type']??'');if($type==='video'){$key=(string)($decoded['source_chat_id']??'').':'.(string)($decoded['message_id']??'');if(isset($delivered[$key]))continue;$delivered[$key]=true;$onVideo($decoded);}elseif($type==='inventory'){if($onInventory!==null)$onInventory($decoded);}elseif($type!=='progress')$summary=$decoded;}
             };
             try{
                 while(true){$consume();$status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}$now=microtime(true);if($heartbeat!==null&&$now-$lastHeartbeat>=3){$lastHeartbeat=$now;if(!$heartbeat()){proc_terminate($process,15);throw new MediaQueueException('SCAN_CANCELLED','اسکن کانال توسط مدیر متوقف شد یا قفل آن منقضی شد.');}}usleep(250000);}
