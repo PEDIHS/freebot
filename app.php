@@ -154,7 +154,7 @@ final class App
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_download_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_upload_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
             $pdo->exec("UPDATE media_batches SET pipeline_depth=1 WHERE source_type='telegram_channel' AND pipeline_depth<>1 AND status IN ('queued','running','paused')");
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.2-telegram-inventory') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.3-legacy-job-compat') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -393,6 +393,17 @@ final class App
         foreach($jobColumns as $column=>$definition){
             if(!$pdo->query("SHOW COLUMNS FROM media_jobs LIKE ".$pdo->quote($column))->fetch())$pdo->exec("ALTER TABLE media_jobs ADD COLUMN `{$column}` {$definition}");
         }
+        // A few intermediate/third-party downloader builds added mandatory
+        // compatibility columns (for example chat_id) that are not part of
+        // FreeBot's canonical media_jobs schema. Such columns must not block
+        // canonical inserts merely because they have no default value.
+        $canonicalJobColumns=array_fill_keys(array_merge(['id'],array_keys($jobColumns)),true);
+        foreach($pdo->query('SHOW FULL COLUMNS FROM media_jobs')->fetchAll() as $legacyColumn){
+            $name=(string)($legacyColumn['Field']??'');$type=(string)($legacyColumn['Type']??'');$extra=strtolower((string)($legacyColumn['Extra']??''));
+            if($name===''||isset($canonicalJobColumns[$name])||strtoupper((string)($legacyColumn['Null']??''))==='YES'||$legacyColumn['Default']!==null||str_contains($extra,'auto_increment')||str_contains($extra,'generated'))continue;
+            if(!preg_match('/^[a-z0-9_(),\' .-]+$/i',$type))continue;
+            $safeName=str_replace('`','``',$name);$pdo->exec("ALTER TABLE media_jobs MODIFY `{$safeName}` {$type} NULL");
+        }
         // Old downloader builds used a mandatory `url` field. Keep its data,
         // but make it nullable so every new insert can use source_url only.
         $legacyUrl=$pdo->query("SHOW COLUMNS FROM media_jobs LIKE 'url'")->fetch();
@@ -413,6 +424,9 @@ final class App
         $pdo->exec("UPDATE media_jobs SET status='failed',error_code=COALESCE(error_code,'LEGACY_STATUS'),error_message=COALESCE(error_message,'وضعیت قدیمی Job هنگام ارتقا قابل بازیابی نبود.') WHERE status NOT IN ({$finalStatusSql})");
         $pdo->exec("UPDATE media_jobs SET status='failed',error_code=COALESCE(error_code,'LEGACY_ROW'),error_message=COALESCE(error_message,'اطلاعات Job قدیمی ناقص است.') WHERE batch_id IS NULL OR source_url IS NULL OR TRIM(source_url)=''");
         $pdo->exec("ALTER TABLE media_jobs MODIFY status enum({$finalStatusSql}) NOT NULL DEFAULT 'queued'");
+        // Resume batches that were stopped by a legacy mandatory-column error
+        // as soon as the compatibility repair above has been applied.
+        $pdo->exec("UPDATE media_batches SET scan_status='queued',scan_attempts=0,scan_next_attempt_at=NOW(),scan_error='ساختار قدیمی media_jobs اصلاح شد؛ ادامه خودکار اسکن زمان‌بندی شد.',scan_locked_by=NULL,scan_lock_token=NULL,scan_lock_expires_at=NULL,status='queued',completed_at=NULL,updated_at=NOW() WHERE source_type='telegram_channel' AND scan_status='failed' AND scan_error LIKE '%General error: 1364%'");
         $indexExists=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_jobs' AND index_name='idx_media_job_pick_v2' LIMIT 1")->fetch();
         if(!$indexExists)$pdo->exec("CREATE INDEX idx_media_job_pick_v2 ON media_jobs(status,next_attempt_at,lock_expires_at,id)");
         $sourceIndex=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_jobs' AND index_name='idx_media_tg_source' LIMIT 1")->fetch();
