@@ -137,6 +137,7 @@ def self_test() -> None:
     ))
     assert metadata["message_id"] == 42 and metadata["file_name"] == "movie.mp4" and metadata["title"] == "Movie title"
     assert validate_credentials({"api_id": "12345", "api_hash": "a" * 32, "phone": "+49123456789"}) == (12345, "a" * 32, "+49123456789")
+    assert validate_transfer_size(1024 * 1024 * 1024) == 1024 * 1024 * 1024
     print("Channel history scanner self-test passed.")
 
 
@@ -153,6 +154,15 @@ def validate_credentials(data: dict[str, object]) -> tuple[int, str, str]:
     return int(api_id), api_hash, phone
 
 
+def validate_transfer_size(size: int) -> int:
+    limit = 1024 * 1024 * 1024
+    if size <= 0:
+        raise RuntimeError("فایل آپلود خالی است.")
+    if size > limit:
+        raise RuntimeError("حجم فایل از سقف ۱ گیگابایت بیشتر است.")
+    return size
+
+
 def friendly_error(error: Exception) -> str:
     name = type(error).__name__
     messages = {
@@ -163,6 +173,9 @@ def friendly_error(error: Exception) -> str:
         "PasswordHashInvalidError": "رمز دومرحله‌ای تلگرام نادرست است.",
         "ApiIdInvalidError": "API ID یا API Hash معتبر نیست.",
         "AuthKeyError": "نشست تلگرام معتبر نیست؛ اتصال را دوباره انجام دهید.",
+        "ChatWriteForbiddenError": "حساب Telethon اجازه ارسال در کانال مقصد را ندارد؛ این حساب را ادمین مقصد کنید.",
+        "ChannelPrivateError": "کانال مقصد برای حساب Telethon قابل دسترسی نیست؛ حساب متصل را عضو و ادمین مقصد کنید.",
+        "FilePartMissingError": "یکی از بخش‌های فایل در تلگرام ثبت نشد؛ انتقال دوباره تلاش می‌شود.",
     }
     if name == "FloodWaitError":
         seconds = int(getattr(error, "seconds", 0) or 0)
@@ -267,7 +280,15 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
     if not api_id.isdigit() or not api_hash:
         raise RuntimeError("TELEGRAM_API_ID/API_HASH are not configured.")
 
-    client = TelegramClient(session, int(api_id), api_hash)
+    client = TelegramClient(
+        session,
+        int(api_id),
+        api_hash,
+        connection_retries=10,
+        request_retries=10,
+        retry_delay=1,
+        auto_reconnect=True,
+    )
     if args.login_only:
         if not phone:
             raise RuntimeError("TELEGRAM_PHONE is not configured.")
@@ -280,7 +301,46 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
     try:
         if not await client.is_user_authorized():
             raise RuntimeError("Scanner session is not authorized. Run setup-channel-scanner.sh.")
-        entity = await resolve_entity(client, args.channel)
+        target = args.destination if args.upload_file else args.channel
+        entity = await resolve_entity(client, target)
+        if args.upload_file:
+            upload = Path(args.upload_file)
+            if not upload.is_absolute() or not upload.is_file():
+                raise RuntimeError("فایل آماده آپلود پیدا نشد.")
+            size = validate_transfer_size(upload.stat().st_size)
+            last_emit = 0.0
+
+            def upload_progress(current: int, total: int) -> None:
+                nonlocal last_emit
+                now = time.monotonic()
+                if now - last_emit < 1.0 and int(current) < int(total):
+                    return
+                last_emit = now
+                emit_json({
+                    "type": "upload_progress",
+                    "uploaded": int(current),
+                    "total": int(total),
+                })
+
+            message = await client.send_file(
+                entity,
+                str(upload),
+                caption=None,
+                force_document=bool(args.force_document),
+                supports_streaming=not bool(args.force_document),
+                part_size_kb=512,
+                progress_callback=upload_progress,
+            )
+            message_id = int(getattr(message, "id", 0) or 0)
+            if message_id <= 0:
+                raise RuntimeError("تلگرام شناسه پیام آپلودشده را برنگرداند.")
+            return {
+                "ok": True,
+                "type": "uploaded",
+                "message_id": message_id,
+                "chat_id": str(utils_get_peer_id(entity)),
+                "size": size,
+            }
         if args.list_videos:
             total_messages = 0
             video_count = 0
@@ -387,6 +447,9 @@ def main() -> int:
     parser.add_argument("--login-only", action="store_true")
     parser.add_argument("--list-videos", action="store_true")
     parser.add_argument("--download-message", action="store_true")
+    parser.add_argument("--upload-file", default="")
+    parser.add_argument("--destination", default="")
+    parser.add_argument("--force-document", action="store_true")
     parser.add_argument("--message-id", type=int, default=0)
     parser.add_argument("--output", default="")
     parser.add_argument("--result-file", default="")
@@ -398,11 +461,15 @@ def main() -> int:
     if args.self_test:
         self_test()
         return 0
-    if not args.login_only and not args.web_action and not args.channel and not args.transport_probe:
+    if not args.login_only and not args.web_action and not args.channel and not args.upload_file and not args.transport_probe:
         parser.error("--channel is required")
     if args.download_message and not args.output:
         parser.error("--output is required with --download-message")
     if args.list_videos and args.download_message:
+        parser.error("choose only one transfer operation")
+    if args.upload_file and not args.destination:
+        parser.error("--destination is required with --upload-file")
+    if args.upload_file and (args.list_videos or args.download_message):
         parser.error("choose only one transfer operation")
     try:
         configure_result_file(args.result_file)

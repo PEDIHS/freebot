@@ -115,10 +115,10 @@ SQL;
             'bot_token'=>App::encrypt($token),'bot_username'=>$bot['username'],'base_url'=>$base,'webhook_secret'=>$secret,
             'panel_username'=>$panelUser,'panel_password_hash'=>password_hash($panelPass,PASSWORD_DEFAULT),'currency'=>'تومان',
             'log_chat_id'=>'','log_chat_url'=>'','proof_chat_id'=>'','proof_url'=>'','sample_movie_url'=>'','referral_percent'=>'5','referral_fixed'=>'0','min_topup'=>'10000',
-            'topup_presets'=>'50000,100000,200000,500000,1000000','downloader_max_mb'=>'45','downloader_temp_hours'=>'24',
+            'topup_presets'=>'50000,100000,200000,500000,1000000','downloader_max_mb'=>'1024','downloader_temp_hours'=>'24',
             'downloader_ytdlp_path'=>'','downloader_aria2_path'=>'','downloader_ffmpeg_path'=>'','downloader_mediainfo_path'=>'',
-            'downloader_batch_limit'=>'100','media_download_timeout'=>'3600','media_upload_timeout'=>'3600','media_lock_seconds'=>'180',
-            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','channel_history_scan_timeout'=>'7200','schema_version'=>'2.4.1-async-channel-scan'
+            'downloader_batch_limit'=>'100','media_download_timeout'=>'21600','media_upload_timeout'=>'21600','media_lock_seconds'=>'180',
+            'media_download_connections'=>'8','media_fragment_concurrency'=>'8','channel_history_scan_timeout'=>'7200','telegram_mtproto_upload'=>'1','schema_version'=>'2.5.0-fast-telegram-relay'
         ];
         $st=$pdo->prepare('INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)');foreach($settings as $k=>$v)$st->execute([$k,(string)$v]);
         $pdo->prepare('INSERT INTO admins (telegram_id,enabled,created_at) VALUES (?,1,NOW()) ON DUPLICATE KEY UPDATE enabled=1')->execute([$owner]);

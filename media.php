@@ -61,7 +61,7 @@ final class MediaQueue
         if(in_array($sourceChannel,$destinations,true))throw new RuntimeException('کانال مبدأ نمی‌تواند یکی از کانال‌های مقصد باشد.');
         foreach($destinations as $destination)self::assertCanPost($destination);
         if(!self::historyScannerStatus()['ready'])throw new RuntimeException('ابتدا حساب تلگرام را از بخش «تنظیم اسکنر کانال» متصل کنید.');
-        $maxAttempts=max(1,min(5,$maxAttempts));$createdBy=mb_substr($createdBy,0,64);$destinationLimit=max(1,min(100000,$destinationLimit));$pipelineDepth=max(1,min(4,$pipelineDepth));
+        $maxAttempts=max(1,min(5,$maxAttempts));$createdBy=mb_substr($createdBy,0,64);$destinationLimit=max(1,min(100000,$destinationLimit));$pipelineDepth=1;
         $title=trim($title)!==''?trim($title):'انتقال کانال '.$sourceChannel;
         $distributionMode=count($destinations)>1?'chunked':'single';
         App::q("INSERT INTO media_batches(product_id,channel_id,title,caption_template,upload_mode,source_type,source_channel_id,sequential_mode,pipeline_depth,distribution_mode,destination_channels_json,destination_limit,scan_status,scan_attempts,scan_max_attempts,scan_next_attempt_at,scan_options_json,status,total_items,created_by,created_at,updated_at) VALUES (?,?,?,'','auto','telegram_channel',?,1,?,?,?,?, 'queued',0,?,NOW(),?,'queued',0,?,NOW(),NOW())",[$productId,$primary,mb_substr($title,0,255),$sourceChannel,$pipelineDepth,$distributionMode,App::j($destinations),$distributionMode==='chunked'?$destinationLimit:0,$maxAttempts,App::j(['skip_existing'=>$skipExisting]),$createdBy]);
@@ -228,7 +228,7 @@ final class MediaQueue
         self::registerWorker($workerId,$role);
         $status=$role==='download'?'queued':'downloaded';$lease=self::lockSeconds();
         $orderGuard=$role==='download'
-            ?"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<=GREATEST(CAST(j.position AS SIGNED)-CAST(GREATEST(1,COALESCE(b.pipeline_depth,1)) AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled')))"
+            ?"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<=GREATEST(CAST(j.position AS SIGNED)-CAST(CASE WHEN b.source_type='telegram_channel' THEN 1 ELSE GREATEST(1,COALESCE(b.pipeline_depth,1)) END AS SIGNED),0) AND previous_job.status NOT IN ('completed','failed','cancelled')))"
             :"(COALESCE(b.sequential_mode,0)=0 OR NOT EXISTS (SELECT 1 FROM media_jobs previous_job WHERE previous_job.batch_id=j.batch_id AND previous_job.position<j.position AND CAST(CASE WHEN OCTET_LENGTH(previous_job.target_channel_id)>0 THEN previous_job.target_channel_id ELSE b.channel_id END AS BINARY)=CAST(CASE WHEN OCTET_LENGTH(j.target_channel_id)>0 THEN j.target_channel_id ELSE b.channel_id END AS BINARY) AND previous_job.status NOT IN ('completed','failed','cancelled')))";
         $engineGuard=$role==='download'?" AND (COALESCE(j.engine,'')<>'telegram-mtproto' OR NOT EXISTS (SELECT 1 FROM media_jobs active_tg WHERE active_tg.engine='telegram-mtproto' AND active_tg.status='downloading' AND active_tg.lock_expires_at>=NOW()))":'';
         for($attempt=0;$attempt<10;$attempt++){
@@ -265,11 +265,12 @@ final class MediaQueue
         $target=self::jobTargetChannel($job);
         self::event($jobId,'info','upload','آپلود بدون کپشن در کانال مقصد آغاز شد.',['channel_id'=>$target,'target_slot'=>(int)($job['target_slot']??1),'target_sequence'=>(int)($job['target_sequence']??$job['position']),'worker'=>$job['locked_by']]);
         $message=self::uploadToTelegram($job,$path);
-        self::assertLease($job);$messageId=(int)($message['message_id']??0);
-        App::q("UPDATE media_jobs SET status='completed',progress=100,telegram_message_id=?,eta_seconds=NULL,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL,heartbeat_at=NOW(),finished_at=NOW(),error_code=NULL,error_message=NULL,updated_at=NOW() WHERE id=? AND lock_token=?",[$messageId,$jobId,$job['lock_token']]);
-        if($messageId>0)App::trackChannelPost($message,'downloader');
-        self::event($jobId,'success','complete','دانلود و آپلود بدون کپشن با موفقیت کامل شد.',['message_id'=>$messageId,'channel_id'=>$target,'file_size'=>filesize($path)?:0]);
+        self::assertLease($job);$messageId=(int)($message['message_id']??0);$uploadedSize=(int)(filesize($path)?:0);
+        $saved=App::q("UPDATE media_jobs SET status='completed',progress=100,telegram_message_id=?,eta_seconds=NULL,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL,heartbeat_at=NOW(),finished_at=NOW(),error_code=NULL,error_message=NULL,updated_at=NOW() WHERE id=? AND lock_token=?",[$messageId,$jobId,$job['lock_token']])->rowCount();
+        if($saved!==1)throw new MediaQueueException('LEASE_LOST','نتیجه آپلود ثبت نشد زیرا Lease جابه‌جا شده است.');
         self::purgeJobFiles($jobId,$path);
+        if($messageId>0){try{App::trackChannelPost($message,'downloader');}catch(Throwable $e){App::logEvent('media_track_warning',$e->getMessage(),['job_id'=>$jobId,'message_id'=>$messageId]);}}
+        self::event($jobId,'success','complete','دانلود، آپلود بدون کپشن و حذف فوری فایل با موفقیت کامل شد.',['message_id'=>$messageId,'channel_id'=>$target,'file_size'=>$uploadedSize,'purged'=>true]);
     }
 
     private static function normaliseWorkerId(string $workerId,string $role): string
@@ -389,6 +390,7 @@ final class MediaQueue
         if(!$scanner['ready'])throw new MediaQueueException('MTPROTO_NOT_READY','حساب تلگرام متصل نیست؛ آن را از بخش تنظیم اسکنر کانال دوباره متصل کنید.');
         $expected=max(0,(int)($job['total_bytes']??0));
         if($expected>self::maxBytes())throw new MediaQueueException('SIZE_LIMIT','حجم ویدیو از سقف '.self::humanBytes(self::maxBytes()).' بیشتر است.');
+        self::assertStorageCapacity($expected);
         $lockName='freebot-mtproto-session';
         $locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
         if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال استفاده است؛ Job خودکار دوباره تلاش می‌شود.',10);
@@ -538,8 +540,56 @@ final class MediaQueue
         if(!self::isSafeExistingFile($path))throw new MediaQueueException('UPLOAD_FILE_MISSING','فایل آماده آپلود پیدا نشد.');
         $mime=self::detectMime($path,(string)($job['mime_type']??''));$mode=(string)$job['upload_mode'];$target=self::jobTargetChannel($job);
         $method=$mode==='document'?'sendDocument':(($mode==='video'||str_starts_with($mime,'video/'))?'sendVideo':'sendDocument');
+        $size=(int)(filesize($path)?:0);
+        if(((string)($job['engine']??'')==='telegram-mtproto'||$size>50*1024*1024)&&(string)App::setting('telegram_mtproto_upload','1')==='1'&&self::historyScannerStatus()['ready'])return self::uploadWithTelethon($job,$path,$mime,$method==='sendDocument');
+        if($size>50*1024*1024)throw new MediaQueueException('MTPROTO_UPLOAD_REQUIRED','برای آپلود فایل بزرگ‌تر از ۵۰ مگابایت، حساب Telethon باید متصل و «آپلود MTProto» فعال باشد.');
         try{return self::telegramFileRequest($method,$target,$path,$mime,$job);}
         catch(MediaQueueException $e){if($method==='sendVideo'&&in_array($e->errorCode,['TELEGRAM_API','TELEGRAM_FORMAT'],true)){self::event((int)$job['id'],'warning','upload','ارسال به‌صورت ویدیو پذیرفته نشد؛ تلاش به‌صورت فایل و بدون کپشن انجام می‌شود.');return self::telegramFileRequest('sendDocument',$target,$path,$mime,$job);}throw $e;}
+    }
+
+    private static function uploadWithTelethon(array $job,string $path,string $mime,bool $forceDocument): array
+    {
+        $scanner=self::historyScannerStatus();$runtime=self::scannerRuntime();$target=self::jobTargetChannel($job);$jobId=(int)$job['id'];
+        if(!$scanner['ready']||!is_executable($runtime['python'])||!is_file($runtime['script']))throw new MediaQueueException('MTPROTO_NOT_READY','موتور آپلود MTProto آماده نیست؛ اتصال حساب تلگرام و update.sh را بررسی کنید.');
+        if(!self::functionEnabled('proc_open'))throw new MediaQueueException('PROC_OPEN_DISABLED','تابع proc_open در PHP غیرفعال است.');
+        $size=(int)(filesize($path)?:0);if($size<=0||$size>self::maxBytes())throw new MediaQueueException('SIZE_LIMIT','حجم فایل خارج از سقف ۱ گیگابایت است.');
+        $lockName='freebot-mtproto-session';$locked=(int)(App::one('SELECT GET_LOCK(?,0) acquired',[$lockName])['acquired']??0)===1;
+        if(!$locked)throw new MediaQueueException('MTPROTO_BUSY','نشست تلگرام در حال انتقال فایل دیگری است؛ Job خودکار دوباره تلاش می‌شود.',10);
+        $process=null;$pipes=[];$resultFile='';$closed=false;
+        try{
+            $resultFile=self::newScannerResultFile();
+            $command=[$runtime['python'],$runtime['script'],'--upload-file',$path,'--destination',$target,'--session',$scanner['session_base'],'--config',$runtime['config'],'--result-file',$resultFile];
+            if($forceDocument)$command[]='--force-document';
+            $input=self::webScannerCredentials()??[];if($input!==[])$command[]='--json-input';
+            $process=proc_open($command,[0=>['pipe','r'],1=>['pipe','w'],2=>['pipe','w']],$pipes,__DIR__,null,['bypass_shell'=>true]);
+            if(!is_resource($process))throw new MediaQueueException('MTPROTO_UPLOAD_START','اجرای آپلود MTProto ممکن نشد.');
+            if($input!==[])fwrite($pipes[0],App::j($input));fclose($pipes[0]);unset($pipes[0]);
+            stream_set_blocking($pipes[1],false);stream_set_blocking($pipes[2],false);
+            self::event($jobId,'info','upload','آپلود پرسرعت MTProto بدون کپشن آغاز شد.',['channel_id'=>$target,'file_size'=>$size,'part_size_kb'=>512]);
+            $buffer='';$stderr='';$payload=null;$startedAt=microtime(true);$exitCode=null;$timeout=self::uploadTimeout();
+            while(true){
+                $buffer.=stream_get_contents($pipes[1])?:'';$stderr.=stream_get_contents($pipes[2])?:'';
+                while(($newline=strpos($buffer,"\n"))!==false){
+                    $line=trim(substr($buffer,0,$newline));$buffer=substr($buffer,$newline+1);if($line==='')continue;$decoded=json_decode($line,true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(!is_array($decoded))continue;
+                    if(($decoded['type']??'')==='upload_progress'){$uploaded=max(0,(int)($decoded['uploaded']??0));$total=max($size,(int)($decoded['total']??0));if(!self::updateTransferProgress($job,'upload',$uploaded,$total,$startedAt,72,27)){proc_terminate($process,15);throw new MediaQueueException('JOB_CANCELLED','Job توسط مدیر لغو شد.');}}
+                    else $payload=$decoded;
+                }
+                if(strlen($buffer)>1048576||strlen($stderr)>1048576){proc_terminate($process,9);throw new MediaQueueException('MTPROTO_OUTPUT','خروجی موتور MTProto بیش از حد مجاز بود.');}
+                $status=proc_get_status($process);if(!$status['running']){$exitCode=(int)$status['exitcode'];break;}
+                if(microtime(true)-$startedAt>$timeout){proc_terminate($process,15);usleep(300000);proc_terminate($process,9);$exitCode=124;break;}
+                usleep(100000);
+            }
+            $buffer.=self::drainFinishedPipe($pipes[1],2097152-strlen($buffer));$stderr.=self::drainFinishedPipe($pipes[2],1048576-strlen($stderr));
+            foreach(array_filter(array_map('trim',preg_split('/\R/',$buffer)?:[])) as $line){$decoded=json_decode($line,true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(is_array($decoded)&&($decoded['type']??'')!=='upload_progress')$payload=$decoded;}
+            if(is_file($resultFile)&&($stored=fopen($resultFile,'rb'))!==false){while(($line=fgets($stored))!==false){$decoded=json_decode(trim($line),true,512,JSON_BIGINT_AS_STRING|JSON_INVALID_UTF8_SUBSTITUTE);if(is_array($decoded)&&($decoded['type']??'')!=='upload_progress')$payload=$decoded;}fclose($stored);}
+            fclose($pipes[1]);fclose($pipes[2]);$pipes=[];$closed=true;$closeCode=proc_close($process);$process=null;if($exitCode===null||$exitCode<0)$exitCode=$closeCode;
+            if(($exitCode!==null&&$exitCode>0)||!is_array($payload)||!($payload['ok']??false)){$detail=is_array($payload)?(string)($payload['error']??''):'';if($detail==='')$detail=trim($stderr)?:'آپلود MTProto پاسخ معتبر نداد.';throw new MediaQueueException('MTPROTO_UPLOAD',self::cleanError($detail));}
+            $messageId=(int)($payload['message_id']??0);if($messageId<=0)throw new MediaQueueException('MTPROTO_UPLOAD_RESULT','شناسه پیام مقصد دریافت نشد.');
+            $media=$forceDocument?'document':'video';
+            return ['message_id'=>$messageId,'date'=>time(),'chat'=>['id'=>$target],$media=>['file_id'=>null,'file_size'=>$size,'mime_type'=>$mime]];
+        }finally{
+            if($resultFile!=='')@unlink($resultFile);foreach($pipes as $pipe)if(is_resource($pipe))@fclose($pipe);if(is_resource($process)){@proc_terminate($process,9);if(!$closed)@proc_close($process);}try{App::q('SELECT RELEASE_LOCK(?)',[$lockName]);}catch(Throwable){}
+        }
     }
 
     private static function jobTargetChannel(array $job): string
@@ -578,7 +628,7 @@ final class MediaQueue
             App::q("UPDATE media_jobs SET status='cancelled',locked_by=NULL,lock_token=NULL,lock_expires_at=NULL,error_code='BATCH_CANCELLED',error_message='دسته توسط مدیر لغو شد.',finished_at=NOW(),updated_at=NOW() WHERE id=?",[$jobId]);
             self::event($jobId,'warning','cancelled','پردازش به‌دلیل لغو دسته متوقف شد.');return false;
         }
-        $permanent=in_array($code,['INVALID_URL','PRIVATE_URL','UNSUPPORTED_SCHEME','SIZE_LIMIT','ENGINE_MISSING','UNSUPPORTED_SOURCE','PROC_OPEN_DISABLED','TELEGRAM_FORMAT','TELEGRAM_SOURCE_MISSING'],true);
+        $permanent=in_array($code,['INVALID_URL','PRIVATE_URL','UNSUPPORTED_SCHEME','SIZE_LIMIT','ENGINE_MISSING','UNSUPPORTED_SOURCE','PROC_OPEN_DISABLED','TELEGRAM_FORMAT','TELEGRAM_SOURCE_MISSING','MTPROTO_UPLOAD_REQUIRED'],true);
         $retry=!$permanent&&$attempts<$max;
         $retryAfter=$e instanceof MediaQueueException&&$e->retryAfter!==null?$e->retryAfter:min(900,15*(2**max(0,$attempts-1)));$retryAfter=max(3,$retryAfter);
         if($stage==='download')self::purgeJobFiles($jobId,(string)($fresh['file_path']??''));
@@ -999,8 +1049,9 @@ final class MediaQueue
         return $data;
     }
     private static function storageRoot(): string{$path=__DIR__.'/storage/media';if(!is_dir($path)&&!@mkdir($path,0750,true)&&!is_dir($path))throw new MediaQueueException('STORAGE_CREATE','ساخت پوشه ذخیره‌سازی ممکن نیست.');return $path;}
+    private static function assertStorageCapacity(int $expected): void{if($expected<=0)return;$free=@disk_free_space(self::storageRoot());$reserve=max(268435456,(int)ceil($expected*.10));if($free!==false&&$free<$expected+$reserve)throw new MediaQueueException('DISK_SPACE','فضای موقت کافی نیست؛ برای این فایل حداقل '.self::humanBytes($expected+$reserve).' فضای خالی لازم است.',60);}
     private static function jobDirectory(int $jobId): string{$path=self::storageRoot().'/job_'.$jobId;if(!is_dir($path)&&!@mkdir($path,0750,true)&&!is_dir($path))throw new MediaQueueException('STORAGE_CREATE','ساخت پوشه موقت لینک ممکن نیست.');return $path;}
-    private static function maxBytes(): int{return max(5,min(1900,(int)App::setting('downloader_max_mb','45')))*1048576;}
+    private static function maxBytes(): int{return max(5,min(1024,(int)App::setting('downloader_max_mb','1024')))*1048576;}
     private static function isSafeExistingFile(string $path): bool{if($path===''||!is_file($path))return false;$real=realpath($path);$root=realpath(self::storageRoot());return $real!==false&&$root!==false&&str_starts_with($real,$root.DIRECTORY_SEPARATOR);}
     private static function deleteSafeFile(string $path): void{if($path===''||!is_file($path))return;$real=realpath($path);$root=realpath(self::storageRoot());if($real!==false&&$root!==false&&str_starts_with($real,$root.DIRECTORY_SEPARATOR))@unlink($real);}
     private static function purgeJobFiles(int $jobId,string $path=''): void{$dir=__DIR__.'/storage/media/job_'.$jobId;self::deleteSafeFile($path);if(is_dir($dir)){foreach(glob($dir.'/*')?:[] as $file)self::deleteSafeFile($file);@rmdir($dir);}try{App::q('UPDATE media_jobs SET file_path=NULL WHERE id=?',[$jobId]);}catch(Throwable){}}

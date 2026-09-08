@@ -4,7 +4,7 @@ declare(strict_types=1);
 final class App
 {
     private static ?PDO $pdo=null;
-    private static array $settings=['media_lock_seconds'=>'180','downloader_temp_hours'=>'24','downloader_max_mb'=>'45'];
+    private static array $settings=['media_lock_seconds'=>'180','downloader_temp_hours'=>'24','downloader_max_mb'=>'1024','telegram_mtproto_upload'=>'1'];
     public static function db(): PDO
     {
         if(self::$pdo)return self::$pdo;$dsn=getenv('FREEBOT_TEST_DSN')?:'mysql:host=127.0.0.1;dbname=freebot_test;charset=utf8mb4';
@@ -27,6 +27,7 @@ require dirname(__DIR__).'/media.php';
 
 function expect(bool $condition,string $message): void{if(!$condition)throw new RuntimeException($message);}
 $pipePair=stream_socket_pair(STREAM_PF_UNIX,STREAM_SOCK_STREAM,STREAM_IPPROTO_IP);expect(is_array($pipePair),'test pipe pair must be available');fwrite($pipePair[1],'{"ok":true}');fclose($pipePair[1]);$drain=new ReflectionMethod(MediaQueue::class,'drainFinishedPipe');$drain->setAccessible(true);expect($drain->invoke(null,$pipePair[0],1024)==='{"ok":true}','finished process output must be drained completely');fclose($pipePair[0]);
+$maxBytes=new ReflectionMethod(MediaQueue::class,'maxBytes');$maxBytes->setAccessible(true);expect($maxBytes->invoke(null)===1024*1024*1024,'media hard limit must be exactly one GiB');
 $pdo=App::db();
 foreach(['media_job_events','media_workers','media_jobs','media_batches','products'] as $table)$pdo->exec("DROP TABLE IF EXISTS `$table`");
 $pdo->exec("CREATE TABLE products (id int unsigned AUTO_INCREMENT PRIMARY KEY,title varchar(255) NOT NULL,channel_id varchar(64) NOT NULL,enabled tinyint(1) NOT NULL DEFAULT 1) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
@@ -92,21 +93,26 @@ expect(is_array($sequentialSecond)&&(int)$sequentialSecond['position']===2,'seco
 
 App::q("UPDATE media_jobs SET status='completed',locked_by=NULL,lock_token=NULL,lock_expires_at=NULL");
 $pipelineBatch=MediaQueue::createBatch(1,"https://example.com/p1.mp4\nhttps://example.com/p2.mp4\nhttps://example.com/p3.mp4",'Pipeline queue');
-App::q('UPDATE media_batches SET sequential_mode=1,pipeline_depth=2,distribution_mode=\'chunked\',destination_channels_json=?,destination_limit=2 WHERE id=?',[App::j(['-100123','-100456']),$pipelineBatch]);
+App::q('UPDATE media_batches SET source_type=\'telegram_channel\',sequential_mode=1,pipeline_depth=4,distribution_mode=\'chunked\',destination_channels_json=?,destination_limit=2 WHERE id=?',[App::j(['-100123','-100456']),$pipelineBatch]);
 App::q("UPDATE media_jobs SET engine='telegram-mtproto',target_channel_id=IF(position<=2,'-100123','-100456'),target_slot=IF(position<=2,1,2),target_sequence=IF(position<=2,position,position-2) WHERE batch_id=?",[$pipelineBatch]);
 $pipelineFirst=$claim->invoke(null,'download','pipeline-download-1');
 expect(is_array($pipelineFirst)&&(int)$pipelineFirst['position']===1,'pipeline first video must be claimable');
 App::q("UPDATE media_jobs SET status='downloaded',progress=70,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL WHERE id=?",[$pipelineFirst['id']]);
 $pipelineSecond=$claim->invoke(null,'download','pipeline-download-2');
-expect(is_array($pipelineSecond)&&(int)$pipelineSecond['position']===2,'pipeline depth two must overlap next download with prior upload wait');
-App::q("UPDATE media_jobs SET status='downloaded',progress=70,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL WHERE id=?",[$pipelineSecond['id']]);
-expect($claim->invoke(null,'download','pipeline-download-3')===null,'pipeline depth must bound files kept on disk');
+expect($pipelineSecond===null,'Telegram relay must never download a second file before the first upload completes');
 $pipelineUploadOne=$claim->invoke(null,'upload','pipeline-upload-1');
 expect(is_array($pipelineUploadOne)&&(int)$pipelineUploadOne['position']===1,'first destination upload must start in order');
+App::q("UPDATE media_jobs SET status='completed',progress=100,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL WHERE id=?",[$pipelineUploadOne['id']]);
+$pipelineSecond=$claim->invoke(null,'download','pipeline-download-3');
+expect(is_array($pipelineSecond)&&(int)$pipelineSecond['position']===2,'next Telegram download must start only after successful upload');
+App::q("UPDATE media_jobs SET status='downloaded',progress=70,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL WHERE id=?",[$pipelineSecond['id']]);
+$pipelineUploadSecond=$claim->invoke(null,'upload','pipeline-upload-2');
+expect(is_array($pipelineUploadSecond)&&(int)$pipelineUploadSecond['position']===2,'second upload must follow the first in strict relay order');
+App::q("UPDATE media_jobs SET status='completed',progress=100,locked_by=NULL,lock_token=NULL,lock_expires_at=NULL WHERE id=?",[$pipelineUploadSecond['id']]);
 App::q("UPDATE media_jobs SET status='downloaded',progress=70 WHERE batch_id=? AND position=3",[$pipelineBatch]);
-$pipelineUploadTwo=$claim->invoke(null,'upload','pipeline-upload-2');
-expect(is_array($pipelineUploadTwo)&&(int)$pipelineUploadTwo['position']===3,'different destination channels may upload concurrently');
-expect($claim->invoke(null,'upload','pipeline-upload-3')===null,'same destination must preserve video order');
+$pipelineUploadTwo=$claim->invoke(null,'upload','pipeline-upload-3');
+expect(is_array($pipelineUploadTwo)&&(int)$pipelineUploadTwo['position']===3,'destination routing must remain stable');
+expect($claim->invoke(null,'upload','pipeline-upload-4')===null,'same destination must preserve video order');
 $stats=MediaQueue::batchDestinationStats($pipelineBatch);
 expect(count($stats)===2&&(int)$stats[0]['total']===2&&(int)$stats[1]['total']===1,'destination statistics must remain separate');
 $persisted=App::one('SELECT target_channel_id,target_slot,target_sequence FROM media_jobs WHERE batch_id=? AND position=3',[$pipelineBatch]);
