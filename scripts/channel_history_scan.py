@@ -344,8 +344,8 @@ async def run(args: argparse.Namespace, input_data: dict[str, object]) -> dict[s
         if args.list_videos:
             total_messages = 0
             video_count = 0
-            last_message_id = 0
-            async for message in client.iter_messages(entity, reverse=True):
+            last_message_id = max(0, int(args.min_message_id))
+            async for message in client.iter_messages(entity, reverse=True, min_id=last_message_id):
                 total_messages += 1
                 last_message_id = max(last_message_id, int(getattr(message, "id", 0) or 0))
                 if getattr(message, "video", None) is None:
@@ -451,6 +451,7 @@ def main() -> int:
     parser.add_argument("--destination", default="")
     parser.add_argument("--force-document", action="store_true")
     parser.add_argument("--message-id", type=int, default=0)
+    parser.add_argument("--min-message-id", type=int, default=0)
     parser.add_argument("--output", default="")
     parser.add_argument("--result-file", default="")
     parser.add_argument("--json-input", action="store_true")
