@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'patches/fix_collation_2_8_1.py'
+      - 'patches/trigger-collation-2.8.1'
 
 permissions:
   contents: write
