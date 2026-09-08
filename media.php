@@ -70,6 +70,39 @@ final class MediaQueue
         return ['batch_id'=>$batchId,'scanned'=>0,'queued'=>0,'skipped'=>0,'channel_title'=>'','destinations'=>$destinations,'scan_status'=>'queued'];
     }
 
+    public static function updateTelegramChannelBatch(int $batchId,string $title,string $secondDestination='',string $thirdDestination='',int $destinationLimit=2000,int $maxAttempts=3): void
+    {
+        $batch=App::one('SELECT * FROM media_batches WHERE id=?',[$batchId]);
+        if(!$batch||($batch['source_type']??'')!=='telegram_channel')throw new RuntimeException('صف انتقال تلگرامی پیدا نشد.');
+        if(($batch['scan_status']??'')==='scanning')throw new RuntimeException('اسکن هم‌اکنون فعال است؛ ابتدا «توقف» را بزنید و پس از توقف Worker صف را ویرایش کنید.');
+        if(($batch['status']??'')==='cancelled')throw new RuntimeException('صف لغوشده قابل ویرایش نیست.');
+        $primary=self::normaliseChannelId((string)$batch['channel_id'],'مقصد اول');$source=self::normaliseChannelId((string)$batch['source_channel_id'],'مبدأ');$destinations=[$primary];
+        if(trim($secondDestination)!=='')$destinations[]=self::normaliseChannelId($secondDestination,'مقصد دوم');
+        if(trim($thirdDestination)!==''){
+            if(count($destinations)<2)throw new RuntimeException('برای ثبت مقصد سوم، مقصد دوم را نیز وارد کنید.');
+            $destinations[]=self::normaliseChannelId($thirdDestination,'مقصد سوم');
+        }
+        if(count(array_unique($destinations))!==count($destinations))throw new RuntimeException('کانال‌های مقصد باید متفاوت باشند.');
+        if(in_array($source,$destinations,true))throw new RuntimeException('کانال مبدأ نمی‌تواند یکی از کانال‌های مقصد باشد.');
+        foreach($destinations as $destination)self::assertCanPost($destination);
+        $destinationLimit=max(1,min(100000,$destinationLimit));$maxAttempts=max(1,min(5,$maxAttempts));$distribution=count($destinations)>1?'chunked':'single';$title=trim($title)!==''?mb_substr(trim($title),0,255):(string)$batch['title'];
+        $pdo=App::db();$pdo->beginTransaction();
+        try{
+            $locked=App::one('SELECT * FROM media_batches WHERE id=? FOR UPDATE',[$batchId]);
+            if(!$locked||($locked['scan_status']??'')==='scanning')throw new RuntimeException('Worker اسکن صف را هم‌زمان فعال کرده است؛ ابتدا صف را متوقف کنید.');
+            $busy=(int)(App::one("SELECT COUNT(*) c FROM media_jobs WHERE batch_id=? AND (status<>'queued' OR file_path IS NOT NULL)",[$batchId])['c']??0);
+            if($busy>0)throw new RuntimeException('پس از شروع دانلود یا آپلود، تغییر مسیر مقصد امن نیست. فقط عنوان و Retry را در نسخه بعدی می‌توان جداگانه ویرایش کرد.');
+            $jobCount=(int)(App::one('SELECT COUNT(*) c FROM media_jobs WHERE batch_id=?',[$batchId])['c']??0);$capacity=$distribution==='chunked'?count($destinations)*$destinationLimit:PHP_INT_MAX;
+            if($jobCount>$capacity)throw new RuntimeException('ظرفیت جدید از تعداد لینک‌های ساخته‌شده کمتر است. حداقل ظرفیت کل لازم: '.number_format($jobCount).' ویدیو.');
+            $wasFailed=($locked['scan_status']??'')==='failed';$scanStatus=$wasFailed?'queued':(string)$locked['scan_status'];$scanAttempts=$wasFailed?0:min((int)$locked['scan_attempts'],$maxAttempts);$scanNext=$wasFailed?date('Y-m-d H:i:s'):($locked['scan_next_attempt_at']??null);$scanError=$wasFailed?null:($locked['scan_error']??null);$batchStatus=$wasFailed?'queued':(string)$locked['status'];$completedAt=$wasFailed?null:($locked['completed_at']??null);
+            App::q("UPDATE media_batches SET title=?,distribution_mode=?,destination_channels_json=?,destination_limit=?,scan_max_attempts=?,scan_status=?,scan_attempts=?,scan_next_attempt_at=?,scan_error=?,status=?,completed_at=?,updated_at=NOW() WHERE id=?",[$title,$distribution,App::j($destinations),$distribution==='chunked'?$destinationLimit:0,$maxAttempts,$scanStatus,$scanAttempts,$scanNext,$scanError,$batchStatus,$completedAt,$batchId]);
+            foreach($destinations as $index=>$destination){$slot=$index+1;$start=$distribution==='chunked'?$index*$destinationLimit+1:1;$end=$distribution==='chunked'?($index+1)*$destinationLimit:PHP_INT_MAX;App::q('UPDATE media_jobs SET target_channel_id=?,target_slot=?,target_sequence=position-?+1,max_attempts=?,updated_at=NOW() WHERE batch_id=? AND position BETWEEN ? AND ?',[$destination,$slot,$start,$maxAttempts,$batchId,$start,$end]);}
+            $pdo->commit();
+        }catch(Throwable $e){if($pdo->inTransaction())$pdo->rollBack();throw $e;}
+        App::logEvent('telegram_channel_batch_updated','ظرفیت و مقصدهای صف انتقال ویرایش شد.',['batch_id'=>$batchId,'destinations'=>$destinations,'destination_limit'=>$distribution==='chunked'?$destinationLimit:0,'max_attempts'=>$maxAttempts]);
+        self::eventForBatch($batchId,'info','routing','ظرفیت و مقصدهای صف ویرایش شد؛ Jobها و Checkpoint حفظ شدند.');
+    }
+
     private static function normaliseChannelId(string $channelId,string $label): string
     {
         $channelId=trim($channelId);
