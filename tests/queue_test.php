@@ -19,6 +19,7 @@ final class App
     public static function sendLog(string $message): void{}
     public static function trackChannelPost(array $message,string $source): void{}
     public static function j(mixed $value): string{return json_encode($value,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);}
+    public static function h(mixed $value): string{return htmlspecialchars((string)$value,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');}
     public static function baseUrl(): string{return 'https://example.test';}
     public static function token(): string{return 'test-token';}
 }
