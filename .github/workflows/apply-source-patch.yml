@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'patches/2.7.0-parallel-media.patch'
+      - 'patches/apply_2_7_0.py'
 
 permissions:
   contents: write
@@ -17,15 +17,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Validate patch
-        run: git apply --check patches/2.7.0-parallel-media.patch
-      - name: Apply patch
-        run: git apply patches/2.7.0-parallel-media.patch
+      - name: Apply guarded source migration
+        run: python3 patches/apply_2_7_0.py
+      - name: Validate changed files
+        run: |
+          python3 -m py_compile scripts/channel_history_scan.py
+          php -l media.php
+          bash -n install.sh update.sh
+          git diff --check
       - name: Commit source changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add media.php scripts/channel_history_scan.py install.sh update.sh VERSION tests/installer_test.sh
-          git diff --cached --check
           git commit -m "Release 2.7.0 parallel media workers"
           git push origin HEAD:main
