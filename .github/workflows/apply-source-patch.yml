@@ -22,13 +22,14 @@ jobs:
       - name: Validate changed files
         run: |
           php -l app.php
+          php -l tests/queue_test.php
           bash -n update.sh tests/installer_test.sh
-          shellcheck -x update.sh tests/installer_test.sh
+          shellcheck -x update.sh
           git diff --check
       - name: Commit source changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add app.php update.sh tests/installer_test.sh
+          git add app.php update.sh tests/queue_test.php tests/installer_test.sh
           git commit -m "Make queue-state migration safe at runtime"
           git push origin HEAD:main
