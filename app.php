@@ -149,7 +149,7 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.3.6-telethon-ascii-json') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.4.0-channel-distribution') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -219,6 +219,11 @@ final class App
             source_last_message_id bigint unsigned NOT NULL DEFAULT 0,
             source_scanned_items bigint unsigned NOT NULL DEFAULT 0,
             sequential_mode tinyint(1) NOT NULL DEFAULT 0,
+            pipeline_depth tinyint unsigned NOT NULL DEFAULT 1,
+            distribution_mode varchar(20) NOT NULL DEFAULT 'single',
+            destination_channels_json longtext NULL,
+            destination_limit int unsigned NOT NULL DEFAULT 0,
+            overflow_items int unsigned NOT NULL DEFAULT 0,
             status enum('queued','running','paused','completed','completed_with_errors','cancelled') NOT NULL DEFAULT 'queued',
             total_items int unsigned NOT NULL DEFAULT 0,
             completed_items int unsigned NOT NULL DEFAULT 0,
@@ -247,6 +252,11 @@ final class App
             'source_last_message_id'=>"bigint unsigned NOT NULL DEFAULT 0",
             'source_scanned_items'=>"bigint unsigned NOT NULL DEFAULT 0",
             'sequential_mode'=>"tinyint(1) NOT NULL DEFAULT 0",
+            'pipeline_depth'=>"tinyint unsigned NOT NULL DEFAULT 1",
+            'distribution_mode'=>"varchar(20) NOT NULL DEFAULT 'single'",
+            'destination_channels_json'=>"longtext NULL",
+            'destination_limit'=>"int unsigned NOT NULL DEFAULT 0",
+            'overflow_items'=>"int unsigned NOT NULL DEFAULT 0",
             'status'=>"enum('queued','running','paused','completed','completed_with_errors','cancelled') NOT NULL DEFAULT 'queued'",
             'total_items'=>"int unsigned NOT NULL DEFAULT 0",
             'completed_items'=>"int unsigned NOT NULL DEFAULT 0",
@@ -289,6 +299,9 @@ final class App
             source_chat_id varchar(64) NULL,
             source_message_id bigint NULL,
             source_date datetime NULL,
+            target_channel_id varchar(64) NULL,
+            target_slot tinyint unsigned NULL,
+            target_sequence int unsigned NULL,
             telegram_message_id bigint NULL,
             error_code varchar(80) NULL,
             error_message text NULL,
@@ -332,6 +345,9 @@ final class App
             'source_chat_id'=>"varchar(64) NULL",
             'source_message_id'=>"bigint NULL",
             'source_date'=>"datetime NULL",
+            'target_channel_id'=>"varchar(64) NULL",
+            'target_slot'=>"tinyint unsigned NULL",
+            'target_sequence'=>"int unsigned NULL",
             'telegram_message_id'=>"bigint NULL",
             'error_code'=>"varchar(80) NULL",
             'error_message'=>"text NULL",
@@ -364,6 +380,8 @@ final class App
         if(!$indexExists)$pdo->exec("CREATE INDEX idx_media_job_pick_v2 ON media_jobs(status,next_attempt_at,lock_expires_at,id)");
         $sourceIndex=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_jobs' AND index_name='idx_media_tg_source' LIMIT 1")->fetch();
         if(!$sourceIndex)$pdo->exec("CREATE INDEX idx_media_tg_source ON media_jobs(source_chat_id,source_message_id)");
+        $targetIndex=$pdo->query("SELECT 1 FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='media_jobs' AND index_name='idx_media_target' LIMIT 1")->fetch();
+        if(!$targetIndex)$pdo->exec("CREATE INDEX idx_media_target ON media_jobs(target_channel_id,status)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS media_job_events (
             id bigint unsigned AUTO_INCREMENT PRIMARY KEY,
             job_id bigint unsigned NOT NULL,
