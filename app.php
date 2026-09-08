@@ -149,7 +149,12 @@ final class App
             }
             $old = "👥 <b>زیرمجموعه‌گیری</b>\nلینک شما:\n<code>{link}</code>\n\nتعداد زیرمجموعه: {count}\nدرآمد کل: {earned}\nدرصد هر خرید: {percent}%\nمبلغ ثابت هر خرید: {fixed}";
             $pdo->prepare("UPDATE texts SET `value`=? WHERE `key`='referral_info' AND (`value`=? OR TRIM(`value`)='')")->execute([$defaults['referral_info'][1],$old]);
-            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.4.1-async-channel-scan') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('downloader_max_mb','1024') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<50,VALUES(`value`),`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('telegram_mtproto_upload','1') ON DUPLICATE KEY UPDATE `value`=`value`");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_download_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('media_upload_timeout','21600') ON DUPLICATE KEY UPDATE `value`=IF(CAST(`value` AS UNSIGNED)<=3600,VALUES(`value`),`value`)");
+            $pdo->exec("UPDATE media_batches SET pipeline_depth=1 WHERE source_type='telegram_channel' AND pipeline_depth<>1 AND status IN ('queued','running','paused')");
+            $pdo->exec("INSERT INTO settings (`key`,`value`) VALUES ('schema_version','2.5.0-fast-telegram-relay') ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)");
         } catch (Throwable $e) {
             error_log('film-store migration: '.$e->getMessage());
         }
@@ -515,7 +520,7 @@ final class App
             CONSTRAINT fk_invite_event_product FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE SET NULL,
             CONSTRAINT fk_invite_event_order FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE SET NULL
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
-        foreach (['downloader_max_mb'=>'45','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100','channel_history_scan_timeout'=>'7200'] as $key=>$value) {
+        foreach (['downloader_max_mb'=>'1024','downloader_temp_hours'=>'24','downloader_ytdlp_path'=>'','downloader_batch_limit'=>'100','channel_history_scan_timeout'=>'7200','telegram_mtproto_upload'=>'1','media_download_timeout'=>'21600','media_upload_timeout'=>'21600'] as $key=>$value) {
             $st=$pdo->prepare("INSERT INTO settings (`key`,`value`) VALUES (?,?) ON DUPLICATE KEY UPDATE `value`=IF(TRIM(`value`)='',VALUES(`value`),`value`)");
             $st->execute([$key,$value]);
         }
